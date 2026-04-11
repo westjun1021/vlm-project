@@ -1,0 +1,27 @@
+# 가상환경
+venv/
+
+# 테스트 영상 (용량 큼)
+*.mp4
+
+# YOLO 모델 가중치
+*.pt
+
+# 트리거 이미지 (런타임 생성)
+trigger_event_*.jpg
+
+# 로그 및 런타임 생성 파일
+logs/
+static/board/
+static/latest_alert.jpg
+static/latest_alert.json
+
+# Python 캐시
+__pycache__/
+*.pyc
+
+# 환경변수 (API 키)
+.env
+
+# Claude Code 설정
+.claude/

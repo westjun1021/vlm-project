@@ -1,0 +1,594 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI 분실물 자동 게시판</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Pretendard:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg: #f5f3ef;
+            --surface: #ffffff;
+            --border: #e5e2dc;
+            --text: #1a1a1a;
+            --muted: #8a8680;
+            --accent: #2d5016;
+            --accent-light: #e8f0e0;
+            --warn: #b85c00;
+            --warn-bg: #fff4e5;
+            --danger: #b91c1c;
+            --danger-bg: #fef2f2;
+            --safe: #16803c;
+            --safe-bg: #f0fdf4;
+            --radius: 12px;
+            --shadow: 0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
+            --shadow-lg: 0 4px 12px rgba(0,0,0,0.08);
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            background: var(--bg);
+            color: var(--text);
+            font-family: 'Pretendard', -apple-system, sans-serif;
+            min-height: 100vh;
+            line-height: 1.6;
+        }
+
+        /* ── 헤더 ── */
+        .header {
+            background: var(--surface);
+            border-bottom: 1px solid var(--border);
+            padding: 20px 0;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+        .header-inner {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 0 24px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        .logo-icon {
+            width: 36px;
+            height: 36px;
+            background: var(--accent);
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 18px;
+        }
+        .logo h1 {
+            font-size: 18px;
+            font-weight: 700;
+            letter-spacing: -0.02em;
+        }
+        .logo p {
+            font-size: 12px;
+            color: var(--muted);
+            margin-top: 1px;
+        }
+        .header-right {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+        .header-stats {
+            display: flex;
+            gap: 10px;
+        }
+        .stat-chip {
+            padding: 6px 14px;
+            border-radius: 20px;
+            font-size: 13px;
+            font-weight: 500;
+        }
+        .stat-warn { background: var(--warn-bg); color: var(--warn); }
+        .stat-danger { background: var(--danger-bg); color: var(--danger); }
+        .stat-total { background: #f0f0ec; color: var(--muted); }
+
+        /* 서버 상태 표시 */
+        .server-status {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 12px;
+            color: var(--muted);
+            padding: 5px 12px;
+            border-radius: 20px;
+            border: 1px solid var(--border);
+            transition: all 0.3s;
+        }
+        .server-status.offline {
+            color: var(--danger);
+            border-color: #fca5a5;
+            background: var(--danger-bg);
+        }
+        .server-dot {
+            width: 6px; height: 6px;
+            background: var(--safe);
+            border-radius: 50%;
+            animation: blink 2s infinite;
+            flex-shrink: 0;
+            transition: background 0.3s;
+        }
+        .server-status.offline .server-dot {
+            background: var(--danger);
+            animation: none;
+        }
+
+        /* ── 컨텐츠 ── */
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 28px 24px;
+        }
+
+        .section-title {
+            font-size: 15px;
+            font-weight: 600;
+            color: var(--muted);
+            margin-bottom: 16px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .section-title::before {
+            content: '';
+            width: 3px;
+            height: 16px;
+            background: var(--accent);
+            border-radius: 2px;
+        }
+
+        @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.3} }
+        @keyframes fadeIn { from{opacity:0; transform:translateY(6px)} to{opacity:1; transform:translateY(0)} }
+        @keyframes fadeOut { to{opacity:0; transform:scale(0.96)} }
+
+        /* ── 카드 그리드 ── */
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+            gap: 16px;
+        }
+
+        .card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            overflow: hidden;
+            box-shadow: var(--shadow);
+            transition: box-shadow 0.2s, transform 0.2s;
+            animation: fadeIn 0.25s ease;
+        }
+        .card:hover {
+            box-shadow: var(--shadow-lg);
+            transform: translateY(-2px);
+        }
+        .card.status-danger { border-left: 4px solid var(--danger); }
+        .card.status-warning { border-left: 4px solid var(--warn); }
+        .card.removing {
+            animation: fadeOut 0.3s ease forwards;
+        }
+
+        /* 이미지 */
+        .card-image {
+            width: 100%;
+            aspect-ratio: 4/3;
+            object-fit: cover;
+            background: #eae8e3;
+            display: block;
+        }
+        .card-image-placeholder {
+            width: 100%;
+            aspect-ratio: 4/3;
+            background: #eae8e3;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--muted);
+            font-size: 13px;
+        }
+
+        /* 카드 바디 */
+        .card-body { padding: 16px; }
+
+        .card-top {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 10px;
+        }
+        .badge {
+            padding: 3px 10px;
+            border-radius: 6px;
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 0.04em;
+        }
+        .badge-danger { background: var(--danger-bg); color: var(--danger); }
+        .badge-warning { background: var(--warn-bg); color: var(--warn); }
+        .badge-safe { background: var(--safe-bg); color: var(--safe); }
+
+        .card-id {
+            font-size: 12px;
+            color: var(--muted);
+            font-weight: 500;
+        }
+
+        .card-reason {
+            font-size: 14px;
+            color: #444;
+            margin-bottom: 12px;
+            line-height: 1.5;
+            display: -webkit-box;
+            -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical;
+            overflow: hidden;
+        }
+
+        .card-meta {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            font-size: 12px;
+            color: var(--muted);
+        }
+        .card-meta span {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .card-meta .abs-time {
+            font-size: 11px;
+            color: #bbb;
+            margin-left: 2px;
+        }
+
+        .card-footer {
+            padding: 12px 16px;
+            border-top: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .score-bar {
+            flex: 1;
+            height: 4px;
+            background: #eae8e3;
+            border-radius: 2px;
+            margin-right: 12px;
+            overflow: hidden;
+        }
+        .score-fill {
+            height: 100%;
+            border-radius: 2px;
+            transition: width 0.4s ease;
+        }
+        .score-fill.warn { background: var(--warn); }
+        .score-fill.danger { background: var(--danger); }
+        .score-label {
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--muted);
+            white-space: nowrap;
+        }
+
+        .btn-found {
+            padding: 6px 14px;
+            border-radius: 6px;
+            border: 1px solid var(--border);
+            background: var(--surface);
+            color: var(--muted);
+            font-size: 12px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.15s;
+            margin-left: 12px;
+        }
+        .btn-found:hover {
+            background: var(--safe-bg);
+            color: var(--safe);
+            border-color: var(--safe);
+        }
+        .btn-found:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        /* 삭제 실패 토스트 */
+        .toast {
+            position: fixed;
+            bottom: 24px;
+            left: 50%;
+            transform: translateX(-50%) translateY(60px);
+            background: #1a1a1a;
+            color: #fff;
+            padding: 10px 20px;
+            border-radius: 8px;
+            font-size: 13px;
+            z-index: 9999;
+            transition: transform 0.3s ease;
+            pointer-events: none;
+        }
+        .toast.show {
+            transform: translateX(-50%) translateY(0);
+        }
+        .toast.error { background: var(--danger); }
+        .toast.success { background: var(--safe); }
+
+        /* 빈 상태 */
+        .empty-state {
+            text-align: center;
+            padding: 80px 20px;
+            color: var(--muted);
+            grid-column: 1 / -1;
+        }
+        .empty-state .icon { font-size: 48px; margin-bottom: 16px; opacity: 0.4; }
+        .empty-state p { font-size: 15px; }
+        .empty-state .sub { font-size: 13px; margin-top: 6px; }
+
+        /* 반응형 */
+        @media (max-width: 640px) {
+            .grid { grid-template-columns: 1fr; }
+            .header-stats { display: none; }
+        }
+    </style>
+</head>
+<body>
+
+<div class="header">
+    <div class="header-inner">
+        <div class="logo">
+            <div class="logo-icon">📋</div>
+            <div>
+                <h1>AI 분실물 자동 게시판</h1>
+                <p>CCTV 자동 감지 · 실시간 업데이트</p>
+            </div>
+        </div>
+        <div class="header-right">
+            <div class="header-stats">
+                <span class="stat-chip stat-total" id="stat-total">전체 0건</span>
+                <span class="stat-chip stat-warn" id="stat-warn">주의 0</span>
+                <span class="stat-chip stat-danger" id="stat-danger">위험 0</span>
+            </div>
+            <div class="server-status" id="server-status">
+                <div class="server-dot" id="server-dot"></div>
+                <span id="server-label">연결됨</span>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="container">
+    <div class="section-title">
+        감지된 분실물
+    </div>
+    <div class="grid" id="board">
+        <div class="empty-state">
+            <div class="icon">📷</div>
+            <p>감지된 분실물이 없습니다</p>
+            <div class="sub">CCTV에서 방치된 물건이 발견되면 자동으로 등록됩니다</div>
+        </div>
+    </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+    // ── XSS 방지용 이스케이프 ────────────────────────────
+    function esc(str) {
+        const d = document.createElement('div');
+        d.textContent = String(str ?? '');
+        return d.innerHTML;
+    }
+
+    // ── 상대 시간 표시 ───────────────────────────────────
+    function relativeTime(timeStr) {
+        if (!timeStr) return '—';
+        const d = new Date(timeStr.replace(' ', 'T'));
+        if (isNaN(d)) return timeStr;
+        const diff = (Date.now() - d.getTime()) / 1000;
+        if (diff < 60)   return '방금 전';
+        if (diff < 3600) return `${Math.floor(diff / 60)}분 전`;
+        if (diff < 86400) return `${Math.floor(diff / 3600)}시간 전`;
+        return `${Math.floor(diff / 86400)}일 전`;
+    }
+
+    // ── 토스트 알림 ──────────────────────────────────────
+    function showToast(msg, type = '') {
+        const t = document.getElementById('toast');
+        t.textContent = msg;
+        t.className = `toast ${type} show`;
+        clearTimeout(t._timer);
+        t._timer = setTimeout(() => { t.className = `toast ${type}`; }, 3000);
+    }
+
+    // ── 서버 연결 상태 표시 ──────────────────────────────
+    let _serverOnline = true;
+    function setServerStatus(online) {
+        if (_serverOnline === online) return;
+        _serverOnline = online;
+        const el = document.getElementById('server-status');
+        const label = document.getElementById('server-label');
+        if (online) {
+            el.classList.remove('offline');
+            label.textContent = '연결됨';
+        } else {
+            el.classList.add('offline');
+            label.textContent = '서버 연결 끊김';
+        }
+    }
+
+    // ── 카드 렌더링 ──────────────────────────────────────
+    function statusBadge(status) {
+        if (status === 'DANGER')  return '<span class="badge badge-danger">분실 확정</span>';
+        if (status === 'WARNING') return '<span class="badge badge-warning">방치 의심</span>';
+        return '<span class="badge badge-safe">확인 중</span>';
+    }
+
+    function statusClass(status) {
+        if (status === 'DANGER')  return 'status-danger';
+        if (status === 'WARNING') return 'status-warning';
+        return '';
+    }
+
+    function scoreColor(score) {
+        return score >= 80 ? 'danger' : 'warn';
+    }
+
+    function renderCard(post) {
+        const pid   = post.post_id || post._file?.replace('.json', '') || 'unknown';
+        const score = Math.min(100, post.score || 0);
+        // 이미지 URL에 post.time을 캐시 키로 사용 → 서버에서 덮어쓰면 새 이미지 표시
+        const imgSrc = `/board/${encodeURIComponent(pid)}.jpg?t=${encodeURIComponent(post.time || '')}`;
+
+        return `
+        <div class="card ${statusClass(post.status)}" id="card-${esc(pid)}">
+            <img class="card-image" src="${imgSrc}" alt="분실물 이미지"
+                 onerror="this.outerHTML='<div class=card-image-placeholder>이미지 없음</div>'">
+            <div class="card-body">
+                <div class="card-top">
+                    ${statusBadge(post.status)}
+                    <span class="card-id">#${esc(String(post.id ?? '—'))}</span>
+                </div>
+                <div class="card-reason">${esc(post.reason || '분석 중...')}</div>
+                <div class="card-meta">
+                    <span>📍 ${esc(post.location || '—')}</span>
+                    <span>🕐 ${esc(relativeTime(post.time))} <span class="abs-time">${esc(post.time || '')}</span></span>
+                </div>
+            </div>
+            <div class="card-footer">
+                <div class="score-bar">
+                    <div class="score-fill ${scoreColor(score)}" style="width:${score}%"></div>
+                </div>
+                <span class="score-label">${Math.round(score)}점</span>
+                <button class="btn-found" onclick="markFound('${esc(pid)}')" style="margin-left:12px">
+                    찾아감 ✓
+                </button>
+            </div>
+        </div>`;
+    }
+
+    // ── 스마트 diff 렌더링 (전체 재렌더 금지) ───────────
+    // 카드별 마지막 데이터 해시를 저장해 변경된 카드만 교체
+    const _cardData = {};   // pid → { score, status, reason, time }
+
+    function cardHash(post) {
+        return `${post.status}|${post.score}|${post.reason}|${post.time}`;
+    }
+
+    function updateBoard() {
+        fetch('/api/posts')
+            .then(r => {
+                if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                return r.json();
+            })
+            .then(posts => {
+                setServerStatus(true);
+                const board = document.getElementById('board');
+
+                // 통계 갱신
+                const warnCount   = posts.filter(p => p.status === 'WARNING').length;
+                const dangerCount = posts.filter(p => p.status === 'DANGER').length;
+                document.getElementById('stat-total').textContent  = `전체 ${posts.length}건`;
+                document.getElementById('stat-warn').textContent   = `주의 ${warnCount}`;
+                document.getElementById('stat-danger').textContent = `위험 ${dangerCount}`;
+
+                // 빈 상태 처리
+                if (posts.length === 0) {
+                    board.innerHTML = `
+                        <div class="empty-state">
+                            <div class="icon">📷</div>
+                            <p>감지된 분실물이 없습니다</p>
+                            <div class="sub">CCTV에서 방치된 물건이 발견되면 자동으로 등록됩니다</div>
+                        </div>`;
+                    Object.keys(_cardData).forEach(k => delete _cardData[k]);
+                    return;
+                }
+
+                // 빈 상태 placeholder 제거
+                const empty = board.querySelector('.empty-state');
+                if (empty) empty.remove();
+
+                // 삭제된 카드 제거
+                const newIds = new Set(posts.map(p => p.post_id));
+                Object.keys(_cardData).forEach(pid => {
+                    if (!newIds.has(pid)) {
+                        const card = document.getElementById(`card-${pid}`);
+                        if (card) {
+                            card.classList.add('removing');
+                            setTimeout(() => card.remove(), 300);
+                        }
+                        delete _cardData[pid];
+                    }
+                });
+
+                // 추가 / 변경된 카드만 처리
+                posts.forEach((post, idx) => {
+                    const pid  = post.post_id;
+                    const hash = cardHash(post);
+                    const existing = document.getElementById(`card-${pid}`);
+
+                    if (!existing) {
+                        // 신규 카드
+                        const tmp = document.createElement('div');
+                        tmp.innerHTML = renderCard(post).trim();
+                        const newCard = tmp.firstElementChild;
+                        // 정렬 순서 유지: idx번째 위치에 삽입
+                        const ref = board.children[idx] || null;
+                        board.insertBefore(newCard, ref);
+                        _cardData[pid] = hash;
+                    } else if (_cardData[pid] !== hash) {
+                        // 데이터 변경 → 카드만 교체 (이미지 URL 캐시 키가 다르면 이미지도 갱신)
+                        const tmp = document.createElement('div');
+                        tmp.innerHTML = renderCard(post).trim();
+                        existing.replaceWith(tmp.firstElementChild);
+                        _cardData[pid] = hash;
+                    }
+                    // 변경 없으면 DOM 건드리지 않음 → 이미지 깜빡임 없음
+                });
+            })
+            .catch(() => {
+                setServerStatus(false);
+            });
+    }
+
+    // ── 찾아감 처리 ──────────────────────────────────────
+    function markFound(postId) {
+        if (!confirm('이 물건을 찾아갔나요? 게시글이 삭제됩니다.')) return;
+
+        const card = document.getElementById(`card-${postId}`);
+        const btn  = card?.querySelector('.btn-found');
+        if (btn) btn.disabled = true;
+
+        fetch(`/api/posts/${encodeURIComponent(postId)}`, { method: 'DELETE' })
+            .then(r => {
+                if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                if (card) {
+                    card.classList.add('removing');
+                    setTimeout(() => { card.remove(); delete _cardData[postId]; }, 300);
+                }
+                showToast('게시글이 삭제되었습니다.', 'success');
+            })
+            .catch(() => {
+                if (btn) btn.disabled = false;
+                showToast('삭제에 실패했습니다. 다시 시도해 주세요.', 'error');
+            });
+    }
+
+    setInterval(updateBoard, 3000);
+    updateBoard();
+</script>
+</body>
+</html>
