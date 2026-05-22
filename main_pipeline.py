@@ -12,6 +12,7 @@ from tracked_bag import TrackedBag
 from renderer import OverlayRenderer
 from board import save_board_post, remove_board_post
 from logger import save_log, save_alert
+from seats import SEATS, box_in_seat
 
 
 # ============================================================
@@ -21,7 +22,7 @@ def main():
     # ── 초기화 ────────────────────────────────────────────
     yolo    = YOLO(YOLO_MODEL)
     tracker = DeepSort(max_age=150, n_init=3, max_iou_distance=0.9)
-    cap     = cv2.VideoCapture("test_video4.mp4")
+    cap     = cv2.VideoCapture("case1.mp4")
 
     LOCATION = "캠퍼스 열람실"   # 고정값 (운영 시에는 카메라별로 다르게 설정)
 
@@ -30,6 +31,8 @@ def main():
     frame_count   = 0
     renderer      = OverlayRenderer()
     vlm_executor  = ThreadPoolExecutor(max_workers=2)  # VLM 비동기 호출용
+    pipeline_start = time.time()
+    last_seat_debug = 0.0
 
     while cap.isOpened():
         ret, frame = cap.read()
@@ -46,6 +49,7 @@ def main():
         results    = yolo(frame, verbose=False, imgsz=736, conf=YOLO_CONF)[0]
         raw_bag_detections = []
         person_boxes: list[tuple[int, int, int, int]] = []
+        seat_indicators: list[tuple[int, int, int, int, int]] = []   # (x1,y1,x2,y2,cls)
 
         # 1차: 사람과 가방 후보 분리
         for box in results.boxes:
@@ -65,6 +69,9 @@ def main():
                 if aspect > MAX_ASPECT_RATIO:
                     continue
                 raw_bag_detections.append(([x1, y1, w_box, h_box], conf, cls, (x1, y1, x2, y2)))
+            elif cls in SEAT_INDICATOR_CLASSES:
+                # 좌석 점유 표식 — 필터링 없이 매 프레임 새로 수집 (추적 X)
+                seat_indicators.append((x1, y1, x2, y2, cls))
 
         # 2차: 사람 박스와 크게 겹치는 가방 제거 (사람 몸을 가방으로 오인하는 문제)
         detections = []
@@ -333,6 +340,27 @@ def main():
             )
             renderer.draw_person(frame, px1, py1, px2, py2, is_near)
 
+        # ── 디버그 오버레이: 좌석 영역 + 좌석 표식 박스 ─────
+        if DEBUG_DRAW_DETECTIONS:
+            # 좌석 영역을 반투명 사각형으로 표시
+            seat_overlay = frame.copy()
+            for seat in SEATS:
+                if seat.region == (0, 0, 0, 0):
+                    continue
+                sx1, sy1, sx2, sy2 = seat.region
+                cv2.rectangle(seat_overlay, (sx1, sy1), (sx2, sy2), (255, 0, 255), -1)
+                cv2.rectangle(frame, (sx1, sy1), (sx2, sy2), (255, 0, 255), 2)
+                cv2.putText(frame, f"seat_{seat.seat_id}", (sx1 + 4, sy1 + 18),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 255), 2, cv2.LINE_AA)
+            cv2.addWeighted(seat_overlay, 0.15, frame, 0.85, 0, frame)
+
+            # 좌석 표식 박스 (회색 + 클래스명)
+            for ix1, iy1, ix2, iy2, cls in seat_indicators:
+                cv2.rectangle(frame, (ix1, iy1), (ix2, iy2), (180, 180, 180), 1)
+                label = SEAT_INDICATOR_NAMES.get(cls, str(cls))
+                cv2.putText(frame, label, (ix1, iy1 - 3),
+                            cv2.FONT_HERSHEY_PLAIN, 1.0, (180, 180, 180), 1, cv2.LINE_AA)
+
         # ── HUD ───────────────────────────────────────────
         renderer.draw_hud(frame, len(bags), len(person_boxes))
 
@@ -364,6 +392,28 @@ def main():
                     if snoozed:
                         b.reset_to_tracking(current_time)
 
+        # ── 좌석 점유 디버그 (5초마다) ────────────────────
+        if current_time - last_seat_debug >= 5.0:
+            elapsed_sec = int(current_time - pipeline_start)
+            global_counts = {name: 0 for name in SEAT_INDICATOR_NAMES.values()}
+            for _, _, _, _, cls in seat_indicators:
+                global_counts[SEAT_INDICATOR_NAMES[cls]] += 1
+            bag_count = len(bags)
+            counts_str = " ".join(f"{k}={v}" for k, v in global_counts.items())
+            print(f"[t={elapsed_sec}s] global: bag={bag_count} {counts_str}")
+            for seat in SEATS:
+                if seat.region == (0, 0, 0, 0):
+                    print(f"  seat_{seat.seat_id}: (영역 미설정)")
+                    continue
+                bag_in = sum(1 for b in bags.values() if box_in_seat(b._bbox, seat))
+                ind_in = {name: 0 for name in SEAT_INDICATOR_NAMES.values()}
+                for x1, y1, x2, y2, cls in seat_indicators:
+                    if box_in_seat((x1, y1, x2, y2), seat):
+                        ind_in[SEAT_INDICATOR_NAMES[cls]] += 1
+                ind_str = " ".join(f"{k}={v}" for k, v in ind_in.items())
+                print(f"  seat_{seat.seat_id}: bag={bag_in} {ind_str}")
+            last_seat_debug = current_time
+
         # ── GC: 오래된 객체 제거 ──────────────────────────
         if current_time - last_gc > GC_INTERVAL:
             before = len(bags)
@@ -382,8 +432,20 @@ def main():
             scale = DISPLAY_WIDTH / frame.shape[1]
             display = cv2.resize(frame, None, fx=scale, fy=scale)
         cv2.imshow("Intelligent Surveillance AI", display)
-        if cv2.waitKey(1) & 0xFF == ord("q"):
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord("q"):
             break
+        elif key == ord(" "):
+            # space: 일시정지 — 다시 space로 재개, q로 종료
+            while True:
+                k2 = cv2.waitKey(50) & 0xFF
+                if k2 == ord(" "):
+                    break
+                if k2 == ord("q"):
+                    cap.release()
+                    cv2.destroyAllWindows()
+                    vlm_executor.shutdown(wait=False)
+                    return
 
     cap.release()
     cv2.destroyAllWindows()
