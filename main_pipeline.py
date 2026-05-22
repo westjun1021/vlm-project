@@ -133,17 +133,23 @@ def main():
                         break
 
                 if not inherited:
-                    bags[track_id] = TrackedBag(
+                    new_bag = TrackedBag(
                         master_id=track_id,
                         center=(cx, cy),
                         size=(w, h),
                         start_time=current_time,
                     )
+                    new_bag._bbox = (x1, y1, x2, y2)
+                    new_bag.seat_id = seat_occupancy.bag_to_seat(new_bag._bbox)
+                    bags[track_id] = new_bag
+                    print(f"🆕 [ID: {track_id}] 가방 등록 — seat={new_bag.seat_id} bbox={new_bag._bbox}")
                 continue
 
             bag = bags[track_id]
             bag.last_seen = current_time
             bag._bbox     = (x1, y1, x2, y2)
+            # 가방이 좌석 사이로 이동했을 가능성 — 매 프레임 재매핑
+            bag.seat_id   = seat_occupancy.bag_to_seat(bag._bbox)
             master_id     = bag.master_id
 
             # ── 중심점 스무딩 (이동 판정 전에 먼저 수행) ────
@@ -241,11 +247,22 @@ def main():
                     bag._vlm_future = None
                     bag._vlm_context = None
 
-            # TRACKING → SUSPICIOUS
+            # TRACKING → SUSPICIOUS (좌석 점유 신호로 게이트)
             if state == ST_TRACKING and elapsed >= T_TRACKING:
-                print(f"\n⏱️  [ID: {master_id}] {T_TRACKING}초 경과 + 사람 없음 → SUSPICIOUS")
-                bag.state = ST_SUSPICIOUS
-                state     = ST_SUSPICIOUS
+                seat_id  = bag.seat_id
+                seat_st  = seat_occupancy.get_status(seat_id) if seat_id else "ABANDONED"
+                seat_sc  = seat_occupancy.get_score(seat_id) if seat_id else 0
+
+                if seat_st == "OCCUPIED":
+                    # 좌석 점유 신호 충분 → 잠깐 비웠을 뿐. 타이머만 리셋.
+                    bag.start_time = current_time
+                    print(f"💺 [ID: {master_id}] 좌석 {seat_id} 점유({seat_sc:.0f}점 {seat_st}) → SUSPICIOUS 보류")
+                else:
+                    # ABANDONED 또는 PARTIAL — PARTIAL은 진입은 시키되 VLM에 점수 전달
+                    msg_extra = f" + 좌석 {seat_sc:.0f}점 {seat_st}" if seat_id else ""
+                    print(f"\n⏱️  [ID: {master_id}] {T_TRACKING}초 경과 + 사람 없음{msg_extra} → SUSPICIOUS")
+                    bag.state = ST_SUSPICIOUS
+                    state     = ST_SUSPICIOUS
 
             # SUSPICIOUS 판단
             if state == ST_SUSPICIOUS and not bag.vlm_called:
@@ -287,9 +304,14 @@ def main():
                                 "그 사람이 가방의 주인처럼 보인다면 SAFE, "
                                 "그냥 지나치는 행인이거나 아무도 없다면 WARNING으로 판정하세요."
                             )
+                            seat_info = ""
+                            if bag.seat_id:
+                                _sc = seat_occupancy.get_score(bag.seat_id)
+                                _st = seat_occupancy.get_status(bag.seat_id)
+                                seat_info = f"현재 좌석 점유 점수: {_sc:.0f}점 ({_st})"
                             bag._vlm_future = vlm_executor.submit(
                                 call_vlm, fname, elapsed / 60, LOCATION, question,
-                                "SAFE 또는 WARNING"
+                                "SAFE 또는 WARNING", seat_info
                             )
                             bag._vlm_context = {"stage": "SUSPICIOUS", "fname": fname}
                     else:
@@ -323,9 +345,14 @@ def main():
                             "현재 이미지에서 가방 주인으로 보이는 사람이 있나요? "
                             "없다면 DANGER, 있다면 WARNING으로 판정하세요."
                         )
+                        seat_info = ""
+                        if bag.seat_id:
+                            _sc = seat_occupancy.get_score(bag.seat_id)
+                            _st = seat_occupancy.get_status(bag.seat_id)
+                            seat_info = f"현재 좌석 점유 점수: {_sc:.0f}점 ({_st})"
                         bag._vlm_future = vlm_executor.submit(
                             call_vlm, fname, elapsed / 60, LOCATION, question,
-                            "WARNING 또는 DANGER"
+                            "WARNING 또는 DANGER", seat_info
                         )
                         bag._vlm_context = {"stage": "LOST", "fname": fname}
 
@@ -420,6 +447,12 @@ def main():
                 score  = seat_occupancy.get_score(seat.seat_id)
                 status = seat_occupancy.get_status(seat.seat_id)
                 print(f"  seat_{seat.seat_id}: score={int(score)} [{status}] bag={bag_in} {ind_str}")
+            if bags:
+                bag_rows = ", ".join(
+                    f"ID={b.master_id} seat={b.seat_id or '-'} state={b.state}"
+                    for b in bags.values()
+                )
+                print(f"  bags: {bag_rows}")
             last_seat_debug = current_time
 
         # ── GC: 오래된 객체 제거 ──────────────────────────

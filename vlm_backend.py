@@ -13,7 +13,7 @@ from config import VLM_BACKEND, api_key
 _client = OpenAI(api_key=api_key)
 
 
-def _call_gpt(image_path, elapsed_min, location, question, valid_statuses):
+def _call_gpt(image_path, elapsed_min, location, question, valid_statuses, seat_info=""):
     with open(image_path, "rb") as f:
         b64 = base64.b64encode(f.read()).decode()
 
@@ -23,8 +23,10 @@ def _call_gpt(image_path, elapsed_min, location, question, valid_statuses):
         "반드시 JSON 형식으로만 응답하세요. "
         f'형식: {{"status": "{valid_statuses}", "reason": "판단 근거 (한국어)"}}'
     )
+    seat_line = f"\n[좌석 점유] {seat_info}" if seat_info else ""
     user_prompt = (
-        f"[상황] 장소: {location} / 가방 방치 경과 시간: 약 {elapsed_min:.0f}분\n"
+        f"[상황] 장소: {location} / 가방 방치 경과 시간: 약 {elapsed_min:.0f}분"
+        f"{seat_line}\n"
         f"[질문] {question}"
     )
     resp = _client.chat.completions.create(
@@ -46,7 +48,7 @@ def _call_gpt(image_path, elapsed_min, location, question, valid_statuses):
     return raw
 
 
-def _call_local(image_path, elapsed_min, location, question, valid_statuses):
+def _call_local(image_path, elapsed_min, location, question, valid_statuses, seat_info=""):
     """2학기: 파인튜닝 로컬 VLM 서버"""
     import requests
     url = os.getenv("LOCAL_VLM_URL", "http://localhost:8000/predict")
@@ -55,14 +57,15 @@ def _call_local(image_path, elapsed_min, location, question, valid_statuses):
             url,
             files={"image": f},
             data={"elapsed_min": elapsed_min, "location": location,
-                  "question": question, "valid_statuses": valid_statuses},
+                  "question": question, "valid_statuses": valid_statuses,
+                  "seat_info": seat_info},
             timeout=30,
         )
     r.raise_for_status()
     return r.text
 
 
-def call_vlm(image_path, elapsed_min, location, question, valid_statuses):
+def call_vlm(image_path, elapsed_min, location, question, valid_statuses, seat_info=""):
     if VLM_BACKEND == "gpt":
-        return _call_gpt(image_path, elapsed_min, location, question, valid_statuses)
-    return _call_local(image_path, elapsed_min, location, question, valid_statuses)
+        return _call_gpt(image_path, elapsed_min, location, question, valid_statuses, seat_info)
+    return _call_local(image_path, elapsed_min, location, question, valid_statuses, seat_info)

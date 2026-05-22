@@ -34,6 +34,9 @@ class TrackedBag:
         self.person_near_since: float | None       = None
         self.person_last_detected: float           = 0.0   # 마지막으로 사람이 감지된 시각
 
+        # 좌석 매핑 (등록 직후 SeatOccupancy.bag_to_seat()으로 채움)
+        self.seat_id: str | None = None
+
         # VLM
         self.vlm_called    = False
         self.last_vlm_call = 0.0
