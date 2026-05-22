@@ -13,6 +13,7 @@ from renderer import OverlayRenderer
 from board import save_board_post, remove_board_post
 from logger import save_log, save_alert
 from seats import SEATS, box_in_seat
+from seat_occupancy import SeatOccupancy
 
 
 # ============================================================
@@ -33,6 +34,7 @@ def main():
     vlm_executor  = ThreadPoolExecutor(max_workers=2)  # VLM 비동기 호출용
     pipeline_start = time.time()
     last_seat_debug = 0.0
+    seat_occupancy = SeatOccupancy(SEATS)
 
     while cap.isOpened():
         ret, frame = cap.read()
@@ -331,6 +333,10 @@ def main():
             renderer.draw_safe_radius(frame, cx, cy)
             renderer.draw_bag(frame, x1, y1, x2, y2, bag)
 
+        # ── 좌석 점유 점수 갱신 ───────────────────────────
+        # 활성 가방의 최신 _bbox가 반영된 시점에 호출 (의사결정은 페이즈 4에서 연동)
+        seat_occupancy.update(person_boxes, bags, seat_indicators)
+
         # ── 사람 바운딩 박스 그리기 ───────────────────────
         for px1, py1, px2, py2 in person_boxes:
             pcx, pcy = (px1 + px2) // 2, (py1 + py2) // 2
@@ -411,7 +417,9 @@ def main():
                     if box_in_seat((x1, y1, x2, y2), seat):
                         ind_in[SEAT_INDICATOR_NAMES[cls]] += 1
                 ind_str = " ".join(f"{k}={v}" for k, v in ind_in.items())
-                print(f"  seat_{seat.seat_id}: bag={bag_in} {ind_str}")
+                score  = seat_occupancy.get_score(seat.seat_id)
+                status = seat_occupancy.get_status(seat.seat_id)
+                print(f"  seat_{seat.seat_id}: score={int(score)} [{status}] bag={bag_in} {ind_str}")
             last_seat_debug = current_time
 
         # ── GC: 오래된 객체 제거 ──────────────────────────
