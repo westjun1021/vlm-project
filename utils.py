@@ -26,7 +26,7 @@ def box_overlap_ratio(box_a, box_b):
 
 
 def apply_privacy_filter(frame, person_boxes, target_box):
-    """사람 영역 블러 + 가방 주변 크롭"""
+    """사람 영역 블러 + 추적 대상 물건 주변 크롭"""
     h, w = frame.shape[:2]
     out = frame.copy()
     for px1, py1, px2, py2 in person_boxes:

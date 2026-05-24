@@ -25,7 +25,7 @@ def _call_gpt(image_path, elapsed_min, location, question, valid_statuses, seat_
     )
     seat_line = f"\n[좌석 점유] {seat_info}" if seat_info else ""
     user_prompt = (
-        f"[상황] 장소: {location} / 가방 방치 경과 시간: 약 {elapsed_min:.0f}분"
+        f"[상황] 장소: {location} / 물건 방치 경과 시간: 약 {elapsed_min:.0f}분"
         f"{seat_line}\n"
         f"[질문] {question}"
     )

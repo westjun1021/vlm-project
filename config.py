@@ -18,32 +18,46 @@ if not api_key:
 # ============================================================
 #  모델
 # ============================================================
-YOLO_MODEL     = "yolo11n.pt"
+YOLO_MODEL     = "yolo11s.pt"   # s: 닫힌 노트북/작은 컵 인식률 향상 (n→s, 약 19MB)
 PERSON_CLASS    = 0
 VLM_BACKEND     = "gpt"                # "gpt" | "local"
 
 # ── 탐지 대상 클래스 (COCO ID) ───────────────────────────
-BAG_CLASSES              = [24, 26, 28]          # 추적 대상 (backpack, handbag, suitcase)
-SEAT_INDICATOR_CLASSES   = [63, 67, 73, 41]      # 좌석 점유 흔적 (laptop, cell phone, book, cup)
-TARGET_CLASSES           = BAG_CLASSES           # 호환성 별칭 (다음 단계에서 제거)
+# 페이즈 6-A: BAG_CLASSES → TRACKABLE_CLASSES 확장 (가방·노트북·책).
+# 폰(67)은 행인 주머니 오탐 우려 + 분실 빈도 낮아 추적에서 제외.
+TRACKABLE_CLASSES = [
+    24, 26, 28,    # backpack, handbag, suitcase
+    63,            # laptop
+    73,            # book
+]
+BAG_CLASSES    = [24, 26, 28]      # 호환성 별칭 — 점진 제거 예정
+TARGET_CLASSES = TRACKABLE_CLASSES # 호환성 별칭
 
-# ── 좌석 점유 표식 디스플레이 라벨 ────────────────────────
-SEAT_INDICATOR_NAMES = {63: "laptop", 67: "phone", 73: "book", 41: "cup"}
+# ── 표식 디스플레이 라벨 (디버그용) ────────────────────────
+SEAT_INDICATOR_NAMES = {
+    24: "backpack", 26: "handbag", 28: "suitcase",
+    63: "laptop", 67: "phone", 73: "book", 41: "cup",
+}
 
 # ============================================================
 #  거리 / 움직임 (px)
 # ============================================================
 INHERIT_TOLERANCE   = 120               # ID 상속 허용 거리 (DeepSORT ID 변경 시)
-MOVEMENT_TOLERANCE  = 150               # 가방 이동 판단 거리 (스무딩 + 손떨림 + 감지 흔들림 고려)
+MOVEMENT_TOLERANCE  = 150               # 물건 이동 판단 거리 (스무딩 + 손떨림 + 감지 흔들림 고려)
 SAFE_DISTANCE       = 150               # 핸드폰 고해상도 영상 기준 (IP카메라 전환 시 300으로 조정)
 INHERIT_TIME_WINDOW = 60.0              # 초
 
 # ============================================================
-#  상태 머신 시간 임계값 (테스트용 — 운영 시 주석 참고)
+#  상태 머신 시간 임계값 (시연용 10분 영상 기준)
+#  운영 배포 시 아래 주석값으로 교체.
 # ============================================================
-T_TRACKING  = 10    # → SUSPICIOUS  (운영: 600  = 10분)
-T_WARNING   = 15    # → WARNING     (운영: 900  = 15분)
-T_LOST      = 20    # → LOST        (운영: 1800 = 30분)
+# TRACKING → SUSPICIOUS — 카페 컨텍스트(컵 유무)에 따라 분기
+T_TRACKING_CAFE   = 60    # 컵 있음 → 자리 비움 가능성 ↑, 길게 (운영: 600 = 10분)
+T_TRACKING_NOCAFE = 20    # 컵 없음 → 떠났을 가능성 ↑,   짧게 (운영: 180 = 3분)
+T_WARNING         = 90    # → WARNING                       (운영: 900  = 15분)
+T_LOST            = 120   # → LOST                          (운영: 1800 = 30분)
+# 호환성용 별칭 (cafe/nocafe 미분기 코드 경로의 폴백)
+T_TRACKING = T_TRACKING_NOCAFE
 
 # ============================================================
 #  주인 판별
@@ -74,19 +88,26 @@ PERSON_OVERLAP_THRESH = 0.85 # 사람 박스와 85% 이상 겹쳐야 오탐 제�
                              # (카페 환경: 좌석 옆 사람이 정상이라 50%면 정상 가방까지 누락)
 
 # ============================================================
-#  좌석 점유 점수 (SeatOccupancy)
+#  좌석 점유 점수 (SeatOccupancy) — 두 개의 축 분리
 # ============================================================
-# COCO class id → 점유 기여 가중치
-SEAT_WEIGHTS = {
+# 1) 카페 컨텍스트 신호 — "이 좌석이 카페 이용 사이클 안에 있는가"
+#    컵은 분실 대상이 아니라 도메인 신호. 시간 임계값 분기에만 사용.
+CAFE_CONTEXT_CLASSES = [41]      # cup
+CUP_PRESENCE_WINDOW  = 30        # 초: 컵 본 후 N초 동안 카페 컨텍스트 유지
+
+# 2) 점유 흔적 가중치 — "주인이 자리에 있다는 증거"
+#    컵은 여기에 들어가지 않음 (별도 축). 폰은 추적에서 제외돼 가중치도 제거.
+OCCUPANCY_WEIGHTS = {
     24: 30, 26: 30, 28: 30,    # 가방류 (backpack, handbag, suitcase)
     63: 40,                     # 노트북 — 가장 강한 점유 신호
     73: 25,                     # 책
-    67: 20,                     # 폰
-    41: 10,                     # 컵 — 가장 약함 (놓고 가기 쉬움)
 }
 SEAT_WEIGHT_PERSON       = 50   # 사람이 좌석 안에 있을 때
 SEAT_OCCUPIED_THRESHOLD  = 60   # 이 점수 이상이면 OCCUPIED
 SEAT_PARTIAL_THRESHOLD   = 30   # 이 점수 이상이면 PARTIAL, 미만은 ABANDONED
+
+# 객체 인식 끊김 보강 — 좌석 표식이 일시적으로 누락돼도 N초 동안 점수 유지
+INDICATOR_PERSIST_SEC    = 5    # 초
 
 # ============================================================
 #  GC

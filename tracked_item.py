@@ -1,6 +1,9 @@
-"""TrackedBag — 개별 가방 객체의 상태 머신.
+"""TrackedItem — 추적 대상 물건의 상태 머신.
 
-각 추적 대상(가방)에 대한 상태·타이머·체류 기록을 캡슐화한다.
+페이즈 6-A에서 TrackedBag → TrackedItem 리네임. 가방뿐 아니라 노트북·책 등
+TRACKABLE_CLASSES로 확장된 모든 추적 물건을 동일 클래스로 다룬다.
+
+각 추적 대상에 대한 상태·타이머·체류 기록을 캡슐화한다.
 VLM 직접 호출은 하지 않고, 비동기 호출 결과(Future)와 컨텍스트만 보관한다
 (메인 파이프라인이 결과를 소비).
 """
@@ -17,10 +20,10 @@ from config import (
 from utils import dist, box_overlap_ratio
 
 
-class TrackedBag:
-    """하나의 추적 대상(가방)에 대한 상태·타이머·체류 기록을 캡슐화"""
+class TrackedItem:
+    """하나의 추적 대상(가방/노트북/책 등)에 대한 상태·타이머·체류 기록을 캡슐화."""
 
-    def __init__(self, master_id, center, size, start_time):
+    def __init__(self, master_id, center, size, start_time, cls=None):
         self.master_id       = master_id
         self.start_time      = start_time
         self.last_seen       = start_time
@@ -29,12 +32,15 @@ class TrackedBag:
         self.size            = size
         self.state           = ST_TRACKING
 
+        # YOLO 클래스 ID — 점유 가중치 룩업·VLM 컨텍스트에 사용.
+        self.cls: int | None = cls
+
         # 체류 기록
         self.dwell_log: list[tuple[float, float]] = []
         self.person_near_since: float | None       = None
         self.person_last_detected: float           = 0.0   # 마지막으로 사람이 감지된 시각
 
-        # 좌석 매핑 (등록 직후 SeatOccupancy.bag_to_seat()으로 채움)
+        # 좌석 매핑 (등록 직후 SeatOccupancy.item_to_seat()으로 채움)
         self.seat_id: str | None = None
 
         # VLM
@@ -78,19 +84,19 @@ class TrackedBag:
         self.vlm_called      = False
 
     # ── 체류 기록 갱신 ────────────────────────────────────
-    def update_dwell(self, person_boxes, bag_center, bag_box, current_time):
-        """사람-가방 근접 여부 갱신. 중심 거리 OR 박스 겹침으로 판단."""
+    def update_dwell(self, person_boxes, item_center, item_box, current_time):
+        """사람-물건 근접 여부 갱신. 중심 거리 OR 박스 겹침으로 판단."""
         person_is_near = False
 
         for px1, py1, px2, py2 in person_boxes:
             # 방법 1: 중심점 거리
             pcx, pcy = (px1 + px2) // 2, (py1 + py2) // 2
-            if dist(bag_center, (pcx, pcy)) < SAFE_DISTANCE:
+            if dist(item_center, (pcx, pcy)) < SAFE_DISTANCE:
                 person_is_near = True
                 break
-            # 방법 2: 바운딩 박스 겹침 (사람 몸이 가방과 닿아 있으면)
-            if box_overlap_ratio(bag_box, (px1, py1, px2, py2)) > 0 or \
-               box_overlap_ratio((px1, py1, px2, py2), bag_box) > 0:
+            # 방법 2: 바운딩 박스 겹침 (사람 몸이 물건과 닿아 있으면)
+            if box_overlap_ratio(item_box, (px1, py1, px2, py2)) > 0 or \
+               box_overlap_ratio((px1, py1, px2, py2), item_box) > 0:
                 person_is_near = True
                 break
 

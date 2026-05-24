@@ -1,7 +1,7 @@
 """OverlayRenderer — 프레임 위 시각화 (바운딩 박스, 라벨, HUD).
 
-TrackedBag는 type hint 용도로만 참조하므로 TYPE_CHECKING으로 import 분리
-(런타임에는 duck-typed 속성만 사용 — bag.state, bag.score, bag.elapsed 등).
+TrackedItem은 type hint 용도로만 참조하므로 TYPE_CHECKING으로 import 분리
+(런타임에는 duck-typed 속성만 사용 — item.state, item.score, item.elapsed 등).
 """
 from typing import TYPE_CHECKING
 import time
@@ -10,7 +10,7 @@ import cv2
 from config import STATE_COLORS, SAFE_DISTANCE, ST_TRACKING
 
 if TYPE_CHECKING:
-    from tracked_bag import TrackedBag
+    from tracked_item import TrackedItem
 
 
 class OverlayRenderer:
@@ -20,17 +20,17 @@ class OverlayRenderer:
     FONT_SMALL = cv2.FONT_HERSHEY_PLAIN
 
     @staticmethod
-    def draw_bag(frame, x1, y1, x2, y2, bag: "TrackedBag"):
-        """가방 바운딩 박스 + 상태 라벨 + 경과 시간"""
-        color = STATE_COLORS.get(bag.state, (200, 200, 200))
-        thickness = 2 if bag.state == ST_TRACKING else 3
+    def draw_item(frame, x1, y1, x2, y2, item: "TrackedItem"):
+        """추적 물건 바운딩 박스 + 상태 라벨 + 경과 시간"""
+        color = STATE_COLORS.get(item.state, (200, 200, 200))
+        thickness = 2 if item.state == ST_TRACKING else 3
 
         # 바운딩 박스
         cv2.rectangle(frame, (x1, y1), (x2, y2), color, thickness)
 
         # 상태 라벨 배경
-        elapsed_sec = int(bag.elapsed)
-        label = f"ID:{bag.master_id} {bag.state} {elapsed_sec}s"
+        elapsed_sec = int(item.elapsed)
+        label = f"ID:{item.master_id} {item.state} {elapsed_sec}s"
         (tw, th), _ = cv2.getTextSize(label, OverlayRenderer.FONT, 0.5, 1)
         cv2.rectangle(frame, (x1, y1 - th - 10), (x1 + tw + 8, y1), color, -1)
         cv2.putText(frame, label, (x1 + 4, y1 - 5),
@@ -39,7 +39,7 @@ class OverlayRenderer:
         # 점수 바 (박스 아래)
         bar_w = x2 - x1
         bar_h = 4
-        filled = int(bar_w * bag.score / 100)
+        filled = int(bar_w * item.score / 100)
         cv2.rectangle(frame, (x1, y2 + 2), (x2, y2 + 2 + bar_h), (50, 50, 50), -1)
         cv2.rectangle(frame, (x1, y2 + 2), (x1 + filled, y2 + 2 + bar_h), color, -1)
 
