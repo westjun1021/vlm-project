@@ -18,15 +18,20 @@ def _call_gpt(image_path, elapsed_min, location, question, valid_statuses, seat_
         b64 = base64.b64encode(f.read()).decode()
 
     system_prompt = (
-        "당신은 캠퍼스 분실물 관제 AI입니다. "
-        "얼굴/체형은 블러 처리되었습니다. "
-        "반드시 JSON 형식으로만 응답하세요. "
+        "당신은 카페 분실물 관제 AI입니다.\n"
+        "카페에서는 손님이 잠깐 자리를 비우는 일이 흔합니다 "
+        "(화장실, 주문, 통화 등). 좌석에 컵·노트북·가방·책 등 점유 흔적이 "
+        "남아 있다면 '잠깐 자리 비움'일 가능성이 높습니다. "
+        "특히 음료 컵이 있으면 손님이 카페 안에 있을 확률이 큽니다.\n"
+        "주인이 영구적으로 떠난 '진짜 분실'과 '잠깐 자리 비움'을 "
+        "좌석 점유 흔적, 컵 유무, 경과 시간을 종합해 신중히 구분하세요.\n"
+        "얼굴/체형은 블러 처리되었습니다. 반드시 JSON 형식으로만 응답하세요. "
         f'형식: {{"status": "{valid_statuses}", "reason": "판단 근거 (한국어)"}}'
     )
-    seat_line = f"\n[좌석 점유] {seat_info}" if seat_info else ""
+    seat_block = f"\n{seat_info}" if seat_info else ""
     user_prompt = (
         f"[상황] 장소: {location} / 물건 방치 경과 시간: 약 {elapsed_min:.0f}분"
-        f"{seat_line}\n"
+        f"{seat_block}\n"
         f"[질문] {question}"
     )
     resp = _client.chat.completions.create(

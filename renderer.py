@@ -7,7 +7,10 @@ from typing import TYPE_CHECKING
 import time
 import cv2
 
-from config import STATE_COLORS, SAFE_DISTANCE, ST_TRACKING
+from config import (
+    STATE_COLORS, SAFE_DISTANCE, ST_TRACKING,
+    SEAT_COLOR_OCCUPIED, SEAT_COLOR_PARTIAL, SEAT_COLOR_ABANDONED,
+)
 
 if TYPE_CHECKING:
     from tracked_item import TrackedItem
@@ -51,6 +54,37 @@ class OverlayRenderer:
         if is_near_bag:
             cv2.putText(frame, "NEAR", (px1, py1 - 5),
                         OverlayRenderer.FONT_SMALL, 1.0, color, 1, cv2.LINE_AA)
+
+    @staticmethod
+    def draw_seats(frame, seats, seat_occupancy):
+        """좌석 영역을 점유 상태별 색으로 표시.
+
+        OCCUPIED 초록 / PARTIAL 노랑 / ABANDONED 회색.
+        영역 미설정(region=(0,0,0,0)) 좌석은 건너뜀.
+        """
+        if not seats:
+            return
+        color_map = {
+            "OCCUPIED":  SEAT_COLOR_OCCUPIED,
+            "PARTIAL":   SEAT_COLOR_PARTIAL,
+            "ABANDONED": SEAT_COLOR_ABANDONED,
+        }
+        overlay = frame.copy()
+        any_drawn = False
+        for seat in seats:
+            if seat.region == (0, 0, 0, 0):
+                continue
+            status = seat_occupancy.get_status(seat.seat_id)
+            color  = color_map.get(status, (255, 0, 255))   # fallback 핑크
+            sx1, sy1, sx2, sy2 = seat.region
+            cv2.rectangle(overlay, (sx1, sy1), (sx2, sy2), color, -1)
+            cv2.rectangle(frame, (sx1, sy1), (sx2, sy2), color, 2)
+            label = f"seat_{seat.seat_id} [{status}]"
+            cv2.putText(frame, label, (sx1 + 4, sy1 + 18),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2, cv2.LINE_AA)
+            any_drawn = True
+        if any_drawn:
+            cv2.addWeighted(overlay, 0.15, frame, 0.85, 0, frame)
 
     @staticmethod
     def draw_safe_radius(frame, cx, cy):

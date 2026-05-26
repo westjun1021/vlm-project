@@ -1,6 +1,7 @@
 import cv2
 import time
 import json
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from ultralytics import YOLO
 
@@ -17,6 +18,55 @@ from tracker import ItemTracker
 
 
 # ============================================================
+#  성능 측정 — VLM 호출 시간 (별도 스레드에서 실행, 단발 출력)
+# ============================================================
+def _timed_call_vlm(*args, **kwargs):
+    t0 = time.perf_counter()
+    try:
+        result = call_vlm(*args, **kwargs)
+        return result
+    finally:
+        print(f"⏱️  VLM 호출: {(time.perf_counter() - t0) * 1000:.0f} ms")
+
+
+# ============================================================
+#  master_id monotonic 카운터 — BoxMOT track_id 재활용과 무관하게 유일성 보장
+# ============================================================
+_next_master_id = [1]   # 리스트로 mutable 참조
+
+def get_next_master_id() -> int:
+    mid = _next_master_id[0]
+    _next_master_id[0] += 1
+    return mid
+
+
+# ============================================================
+#  VLM 프롬프트용 좌석 컨텍스트 구성 — 카페 신호 + 점유 흔적 + 점수
+# ============================================================
+def _build_seat_info(seat_occupancy, seat_id, current_time) -> str:
+    if not seat_id:
+        return ""
+    cafe   = seat_occupancy.is_cafe_active(seat_id, current_time)
+    score  = seat_occupancy.get_score(seat_id)
+    status = seat_occupancy.get_status(seat_id)
+    breakdown = seat_occupancy.get_breakdown(seat_id)
+    # 점유 흔적 리스트화 — 컵은 별도 라인으로 표시하므로 여기선 제외.
+    bd_parts = []
+    for name, val in breakdown.items():
+        if name == "cup":
+            continue
+        if val > 0:
+            bd_parts.append(f"{name}({val:.0f}점)")
+    bd_str = ", ".join(bd_parts) if bd_parts else "없음"
+    return (
+        f"[좌석 {seat_id} 상황]\n"
+        f"- 카페 이용 신호(컵): {'있음 ☕' if cafe else '없음'}\n"
+        f"- 점유 흔적: {bd_str}\n"
+        f"- 종합 점유 점수: {score:.0f}점 ({status})"
+    )
+
+
+# ============================================================
 #  메인 파이프라인
 # ============================================================
 def main():
@@ -24,8 +74,6 @@ def main():
     yolo    = YOLO(YOLO_MODEL)
     tracker = ItemTracker()   # BoxMOT BotSort 어댑터 (DeepSort 인터페이스 호환)
     cap     = cv2.VideoCapture("case1.mp4")
-
-    LOCATION = "캠퍼스 열람실"   # 고정값 (운영 시에는 카메라별로 다르게 설정)
 
     items: dict[int, TrackedItem] = {}   # track_id → TrackedItem
     last_gc       = 0.0
@@ -36,8 +84,26 @@ def main():
     last_seat_debug = 0.0
     seat_occupancy = SeatOccupancy(SEATS)
 
+    # ── 성능 측정 ─────────────────────────────────────────
+    # 각 처리 단계별 시간을 deque로 누적 (최근 300개 = ~10초 at 30fps).
+    stage_times: dict[str, deque] = {
+        "frame_read":      deque(maxlen=300),
+        "yolo":            deque(maxlen=300),
+        "tracker":         deque(maxlen=300),
+        "state_machine":   deque(maxlen=300),
+        "seat_occupancy":  deque(maxlen=300),
+        "renderer":        deque(maxlen=300),
+        "total":           deque(maxlen=300),
+    }
+    last_perf_summary = time.perf_counter()
+    print(f"⏱️  FRAME_SKIP={FRAME_SKIP} (실시간 기준: 처리 FPS × {FRAME_SKIP} ≥ 영상 FPS)")
+
     while cap.isOpened():
+        iter_start = time.perf_counter()
+
+        t0 = time.perf_counter()
         ret, frame = cap.read()
+        t_frame_read = time.perf_counter() - t0
         if not ret:
             break
 
@@ -48,7 +114,9 @@ def main():
         current_time = time.time()
 
         # ── YOLO 추론 ────────────────────────────────────
-        results    = yolo(frame, verbose=False, imgsz=736, conf=YOLO_CONF)[0]
+        t0 = time.perf_counter()
+        results    = yolo(frame, verbose=False, imgsz=YOLO_IMGSZ, conf=YOLO_CONF)[0]
+        t_yolo = time.perf_counter() - t0
         raw_item_detections = []
         person_boxes: list[tuple[int, int, int, int]] = []
         seat_indicators: list[tuple[int, int, int, int, int]] = []   # (x1,y1,x2,y2,cls)
@@ -88,12 +156,15 @@ def main():
                 detections.append((det[0], det[1], det[2]))
 
         # ── 추적기 업데이트 (BoxMOT) ──────────────────────
+        t0 = time.perf_counter()
         tracks = tracker.update_tracks(detections, frame=frame)
+        t_tracker = time.perf_counter() - t0
 
         # ── 게시판 이미지용 깨끗한 프레임 (오버레이 전) ────
         clean_frame = frame.copy()
 
         # ── 트랙별 처리 ──────────────────────────────────
+        t0 = time.perf_counter()
         for track in tracks:
             if not track.is_confirmed():
                 continue
@@ -135,7 +206,7 @@ def main():
                 if not inherited:
                     det_cls = getattr(track, "det_class", None)
                     new_item = TrackedItem(
-                        master_id=track_id,
+                        master_id=get_next_master_id(),
                         center=(cx, cy),
                         size=(w, h),
                         start_time=current_time,
@@ -145,7 +216,7 @@ def main():
                     new_item.seat_id = seat_occupancy.item_to_seat(new_item._bbox)
                     items[track_id] = new_item
                     cls_label = SEAT_INDICATOR_NAMES.get(det_cls, str(det_cls))
-                    print(f"🆕 [ID: {track_id}] 물건 등록 ({cls_label}) — "
+                    print(f"🆕 [ID: {new_item.master_id}] 물건 등록 ({cls_label}) — "
                           f"seat={new_item.seat_id} bbox={new_item._bbox}")
                 continue
 
@@ -313,13 +384,9 @@ def main():
                                 "그 사람이 물건의 주인처럼 보인다면 SAFE, "
                                 "그냥 지나치는 행인이거나 아무도 없다면 WARNING으로 판정하세요."
                             )
-                            seat_info = ""
-                            if item.seat_id:
-                                _sc = seat_occupancy.get_score(item.seat_id)
-                                _st = seat_occupancy.get_status(item.seat_id)
-                                seat_info = f"현재 좌석 점유 점수: {_sc:.0f}점 ({_st})"
+                            seat_info = _build_seat_info(seat_occupancy, item.seat_id, current_time)
                             item._vlm_future = vlm_executor.submit(
-                                call_vlm, fname, elapsed / 60, LOCATION, question,
+                                _timed_call_vlm, fname, elapsed / 60, LOCATION, question,
                                 "SAFE 또는 WARNING", seat_info
                             )
                             item._vlm_context = {"stage": "SUSPICIOUS", "fname": fname}
@@ -339,39 +406,60 @@ def main():
                 save_log("none.jpg", elapsed / 60, LOCATION, ST_TRACKING, result_json, "CV")
                 remove_board_post(master_id)  # 게시판에서도 삭제
 
-            # WARNING → LOST (VLM 2차 비동기)
+            # WARNING → LOST (카페 컨텍스트 + 점유 흔적 게이트)
+            # 페이즈 6-B: SUSPICIOUS 게이트와 동일한 비대칭 처리를 LOST에도 적용.
+            # 카페+OCCUPIED는 T_LOST 직후 60초간 LOST 호출 보류 → 점유 신호가
+            # 끊기거나 시간 충분히 더 지나야 VLM 호출.
             if state == ST_WARNING and elapsed >= T_LOST:
-                if item._vlm_future is None and current_time - item.last_vlm_call >= API_COOLDOWN:
-                    print(f"\n🚨 [ID: {master_id}] {T_LOST}초 경과 → LOST VLM 2차 비동기 호출")
-                    safe_img = apply_privacy_filter(frame, person_boxes, (x1, y1, x2, y2))
-                    if safe_img is not None:
-                        fname = f"trigger_event_{master_id}_lost.jpg"
-                        cv2.imwrite(fname, safe_img)
-                        item.last_vlm_call = current_time
+                seat_id     = item.seat_id
+                cafe_active = seat_occupancy.is_cafe_active(seat_id, current_time) if seat_id else False
+                seat_st     = seat_occupancy.get_status(seat_id) if seat_id else "ABANDONED"
+                seat_sc     = seat_occupancy.get_score(seat_id) if seat_id else 0
+                cafe_tag    = "☕ 카페" if cafe_active else "🚪 카페外"
 
-                        question = (
-                            "이 물건은 30분 이상 같은 자리에 방치되어 있습니다. "
-                            "현재 이미지에서 물건 주인으로 보이는 사람이 있나요? "
-                            "없다면 DANGER, 있다면 WARNING으로 판정하세요."
-                        )
-                        seat_info = ""
-                        if item.seat_id:
-                            _sc = seat_occupancy.get_score(item.seat_id)
-                            _st = seat_occupancy.get_status(item.seat_id)
-                            seat_info = f"현재 좌석 점유 점수: {_sc:.0f}점 ({_st})"
-                        item._vlm_future = vlm_executor.submit(
-                            call_vlm, fname, elapsed / 60, LOCATION, question,
-                            "WARNING 또는 DANGER", seat_info
-                        )
-                        item._vlm_context = {"stage": "LOST", "fname": fname}
+                if cafe_active and seat_st == "OCCUPIED" and elapsed < T_LOST + 60:
+                    # 점유 흔적 유지 → 추가 60초 유예. 로그 throttling.
+                    if frame_count % 30 == 0:
+                        print(f"💺 [ID: {master_id}] 좌석 {seat_id} 카페 OCCUPIED "
+                              f"({seat_sc:.0f}점) → LOST 호출 보류 "
+                              f"({elapsed:.0f}/{T_LOST + 60}초)")
+                else:
+                    if item._vlm_future is None and current_time - item.last_vlm_call >= API_COOLDOWN:
+                        print(f"\n🚨 [ID: {master_id}] {elapsed:.0f}초 경과 {cafe_tag} "
+                              f"(점유 {seat_sc:.0f}점 {seat_st}) → LOST VLM 호출")
+                        safe_img = apply_privacy_filter(frame, person_boxes, (x1, y1, x2, y2))
+                        if safe_img is not None:
+                            fname = f"trigger_event_{master_id}_lost.jpg"
+                            cv2.imwrite(fname, safe_img)
+                            item.last_vlm_call = current_time
+
+                            question = (
+                                f"이 물건은 약 {elapsed:.0f}초 동안 같은 자리에 있습니다.\n"
+                                f"좌석 점유 흔적과 카페 컨텍스트를 함께 고려해서:\n"
+                                f"- 컵·다른 소지품이 남아 있고 잠깐 비웠을 가능성이 보이면 WARNING\n"
+                                f"- 좌석이 완전히 빈 상태이거나 주인 복귀 흔적이 없으면 DANGER\n"
+                                f"으로 판정하세요."
+                            )
+                            seat_info = _build_seat_info(seat_occupancy, seat_id, current_time)
+                            item._vlm_future = vlm_executor.submit(
+                                _timed_call_vlm, fname, elapsed / 60, LOCATION, question,
+                                "WARNING 또는 DANGER", seat_info
+                            )
+                            item._vlm_context = {"stage": "LOST", "fname": fname}
 
             # ── 오버레이 그리기 ───────────────────────────
             renderer.draw_safe_radius(frame, cx, cy)
             renderer.draw_item(frame, x1, y1, x2, y2, item)
+        t_state = time.perf_counter() - t0
 
         # ── 좌석 점유 점수 + 카페 컨텍스트 갱신 ───────────
         # 활성 물건의 최신 _bbox가 반영된 시점에 호출.
+        t0 = time.perf_counter()
         seat_occupancy.update(person_boxes, items, seat_indicators, current_time)
+        t_seat = time.perf_counter() - t0
+
+        # ── 렌더링 + 보드 + 디버그 + 표시 ─────────────────
+        t_render_start = time.perf_counter()
 
         # ── 사람 바운딩 박스 그리기 ───────────────────────
         for px1, py1, px2, py2 in person_boxes:
@@ -384,17 +472,8 @@ def main():
 
         # ── 디버그 오버레이: 좌석 영역 + 좌석 표식 박스 ─────
         if DEBUG_DRAW_DETECTIONS:
-            # 좌석 영역을 반투명 사각형으로 표시
-            seat_overlay = frame.copy()
-            for seat in SEATS:
-                if seat.region == (0, 0, 0, 0):
-                    continue
-                sx1, sy1, sx2, sy2 = seat.region
-                cv2.rectangle(seat_overlay, (sx1, sy1), (sx2, sy2), (255, 0, 255), -1)
-                cv2.rectangle(frame, (sx1, sy1), (sx2, sy2), (255, 0, 255), 2)
-                cv2.putText(frame, f"seat_{seat.seat_id}", (sx1 + 4, sy1 + 18),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 255), 2, cv2.LINE_AA)
-            cv2.addWeighted(seat_overlay, 0.15, frame, 0.85, 0, frame)
+            # 좌석 영역 — 점유 상태별 색 (OCCUPIED 초록 / PARTIAL 노랑 / ABANDONED 회색)
+            renderer.draw_seats(frame, SEATS, seat_occupancy)
 
             # 좌석 표식 박스 (회색 + 클래스명) — 추적되지 않는 표식만 (현재 컵).
             for ix1, iy1, ix2, iy2, cls in seat_indicators:
@@ -489,6 +568,30 @@ def main():
             scale = DISPLAY_WIDTH / frame.shape[1]
             display = cv2.resize(frame, None, fx=scale, fy=scale)
         cv2.imshow("Intelligent Surveillance AI", display)
+        t_renderer = time.perf_counter() - t_render_start
+
+        # ── 단계별 시간 누적 + 30초마다 요약 출력 ─────────
+        stage_times["frame_read"].append(t_frame_read)
+        stage_times["yolo"].append(t_yolo)
+        stage_times["tracker"].append(t_tracker)
+        stage_times["state_machine"].append(t_state)
+        stage_times["seat_occupancy"].append(t_seat)
+        stage_times["renderer"].append(t_renderer)
+        stage_times["total"].append(time.perf_counter() - iter_start)
+
+        if time.perf_counter() - last_perf_summary >= 30.0:
+            last_perf_summary = time.perf_counter()
+            print("⏱️  단계별 처리 시간 (최근 평균, ms):")
+            for stage, times in stage_times.items():
+                if times:
+                    avg_ms = sum(times) / len(times) * 1000
+                    print(f"   {stage:<15} {avg_ms:>6.1f} ms")
+            if stage_times["total"]:
+                total_avg = sum(stage_times["total"]) / len(stage_times["total"])
+                fps_real = 1.0 / total_avg if total_avg > 0 else 0
+                print(f"   실제 처리 FPS: {fps_real:.1f}  "
+                      f"(실시간 기준: ≥ 영상 FPS / {FRAME_SKIP})")
+
         key = cv2.waitKey(1) & 0xFF
         if key == ord("q"):
             break

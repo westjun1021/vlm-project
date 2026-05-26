@@ -22,6 +22,10 @@ YOLO_MODEL     = "yolo11s.pt"   # s: 닫힌 노트북/작은 컵 인식률 향�
 PERSON_CLASS    = 0
 VLM_BACKEND     = "gpt"                # "gpt" | "local"
 
+# ── 장소 (VLM 컨텍스트) ──────────────────────────────────
+# 운영: 카메라별 다르게 설정. 페이즈 6-B에서 카페 도메인 명시.
+LOCATION = "캠퍼스 카페"
+
 # ── 탐지 대상 클래스 (COCO ID) ───────────────────────────
 # 페이즈 6-A: BAG_CLASSES → TRACKABLE_CLASSES 확장 (가방·노트북·책).
 # 폰(67)은 행인 주머니 오탐 우려 + 분실 빈도 낮아 추적에서 제외.
@@ -82,6 +86,7 @@ BOARD_MIN_SCORE = 75    # 이 점수 이상일 때만 게시판에 등록
 #  감지 필터링
 # ============================================================
 YOLO_CONF       = 0.45     # 신뢰도 임계값 (0.35에서도 오탐 → 0.45)
+YOLO_IMGSZ      = 512       # 작은 객체(컵) 인식률 위해 416→512. 속도 약간 양보.
 MIN_BOX_AREA    = 1500      # px²: 이보다 작은 박스는 무시 (노이즈 제거)
 MAX_ASPECT_RATIO = 5.0      # 가로세로 비율 제한 (길쭉한 오탐 제거)
 PERSON_OVERLAP_THRESH = 0.85 # 사람 박스와 85% 이상 겹쳐야 오탐 제거
@@ -93,7 +98,8 @@ PERSON_OVERLAP_THRESH = 0.85 # 사람 박스와 85% 이상 겹쳐야 오탐 제�
 # 1) 카페 컨텍스트 신호 — "이 좌석이 카페 이용 사이클 안에 있는가"
 #    컵은 분실 대상이 아니라 도메인 신호. 시간 임계값 분기에만 사용.
 CAFE_CONTEXT_CLASSES = [41]      # cup
-CUP_PRESENCE_WINDOW  = 30        # 초: 컵 본 후 N초 동안 카페 컨텍스트 유지
+CUP_PRESENCE_WINDOW  = 60        # 초: 컵 본 후 N초 동안 카페 컨텍스트 유지
+                                 # (페이즈 6-B 검증: 30초였을 때 YOLO 컵 인식 갭에 흔들림)
 
 # 2) 점유 흔적 가중치 — "주인이 자리에 있다는 증거"
 #    컵은 여기에 들어가지 않음 (별도 축). 폰은 추적에서 제외돼 가중치도 제거.
@@ -133,6 +139,11 @@ ST_TRACKING   = "TRACKING"
 ST_SUSPICIOUS = "SUSPICIOUS"
 ST_WARNING    = "WARNING"
 ST_LOST       = "LOST"
+
+# ── 좌석 점유 상태별 표시색 (BGR) ────────────────────────
+SEAT_COLOR_OCCUPIED  = (0, 255, 0)      # 초록
+SEAT_COLOR_PARTIAL   = (0, 255, 255)    # 노랑
+SEAT_COLOR_ABANDONED = (128, 128, 128)  # 회색
 
 # 상태별 색상 (BGR)
 STATE_COLORS = {

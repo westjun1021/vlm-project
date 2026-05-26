@@ -43,10 +43,16 @@ class ItemTracker:
         기본값 osnet_x0_25_msmt17.pt — 가벼운 모델로 충분.
     """
 
-    def __init__(self, reid_weights: str = "osnet_x0_25_msmt17.pt"):
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        # ReID(...).model = PyTorchBackend 인스턴스 (BotSort가 요구하는 백엔드 형식).
-        reid_backend = ReID(weights=reid_weights, device=device).model
+    def __init__(self, reid_weights: str = "osnet_x0_25_msmt17.pt", use_reid: bool = False):
+        # 페이즈 6-B 속도 최적화: ReID 비활성화가 기본값.
+        # tracker 단계 76ms → IoU만으로 충분 (책상 위 정적 물건 시나리오).
+        # 가방·노트북이 잠깐 가려졌다 나올 때 ID가 바뀔 수 있지만, 좌석 매핑이
+        # 핵심이라 시스템 동작에 큰 영향 없음.
+        # 사람 ReID는 페이즈 7에서 별도 처리 예정.
+        reid_backend = None
+        if use_reid:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            reid_backend = ReID(weights=reid_weights, device=device).model
         # max_age=150 / min_hits=3 → 기존 DeepSort(max_age=150, n_init=3)와 동등.
         # track_buffer=150 → BotSort 내부 lost-track 보관 기간을 max_age에 맞춤.
         self._tracker = BotSort(
@@ -54,6 +60,7 @@ class ItemTracker:
             max_age=150,
             min_hits=3,
             track_buffer=150,
+            with_reid=use_reid,
         )
 
     # ── DeepSort 호환 메서드 ────────────────────────────────
