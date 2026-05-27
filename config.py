@@ -48,6 +48,8 @@ SEAT_INDICATOR_NAMES = {
 # ============================================================
 INHERIT_TOLERANCE   = 120               # ID 상속 허용 거리 (DeepSORT ID 변경 시)
 MOVEMENT_TOLERANCE  = 150               # 물건 이동 판단 거리 (스무딩 + 손떨림 + 감지 흔들림 고려)
+STATIC_MIN_SEC      = 5.0               # 페이즈 6-C: N초 정지 후 등록 (행인 오탐 방지)
+STATIC_TOLERANCE_PX = 30                # 정지로 판단할 중심 이동 허용치
 SAFE_DISTANCE       = 150               # 핸드폰 고해상도 영상 기준 (IP카메라 전환 시 300으로 조정)
 INHERIT_TIME_WINDOW = 60.0              # 초
 

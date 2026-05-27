@@ -43,6 +43,11 @@ class TrackedItem:
         # 좌석 매핑 (등록 직후 SeatOccupancy.item_to_seat()으로 채움)
         self.seat_id: str | None = None
 
+        # 페이즈 6-C: TRACKING → SUSPICIOUS 게이트 보류 플래그.
+        # cafe+OCCUPIED로 보류 중일 때 True. elapsed는 계속 누적되며,
+        # 좌석 점수가 OCCUPIED 미만으로 떨어지면 즉시 SUSPICIOUS 정상 진입.
+        self.suspicious_held: bool = False
+
         # VLM
         self.vlm_called    = False
         self.last_vlm_call = 0.0
@@ -82,6 +87,7 @@ class TrackedItem:
         self.dwell_log       = []
         self.person_near_since = None
         self.vlm_called      = False
+        self.suspicious_held = False
 
     # ── 체류 기록 갱신 ────────────────────────────────────
     def update_dwell(self, person_boxes, item_center, item_box, current_time):

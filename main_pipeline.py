@@ -76,6 +76,8 @@ def main():
     cap     = cv2.VideoCapture("case1.mp4")
 
     items: dict[int, TrackedItem] = {}   # track_id → TrackedItem
+    # 페이즈 6-C: 신규 등록 전 정지 검증 — track_id → (first_seen_time, (cx, cy))
+    pending: dict[int, tuple[float, tuple[int, int]]] = {}
     last_gc       = 0.0
     frame_count   = 0
     renderer      = OverlayRenderer()
@@ -185,6 +187,22 @@ def main():
 
             # ── 신규 등록 / ID 상속 ──────────────────────
             if track_id not in items:
+                # 페이즈 6-C: 정지 검증 (STATIC_MIN_SEC 동안 STATIC_TOLERANCE_PX 이내).
+                # 행인이 잠깐 들고 지나가는 가방·노트북은 등록하지 않음.
+                if track_id not in pending:
+                    pending[track_id] = (current_time, (cx, cy))
+                    continue
+                first_time, first_center = pending[track_id]
+                move_px = dist((cx, cy), first_center)
+                if move_px > STATIC_TOLERANCE_PX:
+                    # 움직임 — 정지 타이머 재시작
+                    pending[track_id] = (current_time, (cx, cy))
+                    continue
+                if current_time - first_time < STATIC_MIN_SEC:
+                    continue   # 아직 정지 시간 미달
+                # 정지 확인 — pending 제거 후 ID 상속 / 신규 등록 진행
+                del pending[track_id]
+
                 inherited = False
                 for old_id, old_item in list(items.items()):
                     age = current_time - old_item.last_seen
@@ -255,9 +273,10 @@ def main():
             # ── 상태 전이 ─────────────────────────────────
             state   = item.state
 
-            # ── 사람이 근처에 있으면 방치 타이머 리셋 ────────
-            # "방치 시간"은 사람이 떠난 시점부터 세야 함
-            if state == ST_TRACKING and item.person_is_near:
+            # ── owner가 자리에 머무는 동안 방치 타이머 리셋 ────
+            # "방치 시간"은 owner가 있다가 떠난 시점부터 세야 함.
+            # passerby (3초 미만 체류)는 리셋 대상 아님 — SUSPICIOUS 게이트와 동일 기준.
+            if state == ST_TRACKING and item.person_near_duration >= PASSERBY_MAX_SEC:
                 item.start_time = current_time
 
             elapsed = item.elapsed
@@ -333,11 +352,19 @@ def main():
                     seat_sc = seat_occupancy.get_score(seat_id) if seat_id else 0
 
                     if cafe_active and seat_st == "OCCUPIED":
-                        # 컵 있음 + 점유 흔적 충분 → 잠깐 자리 비움. 한 번 더 기회.
-                        item.start_time = current_time
-                        print(f"💺 [ID: {master_id}] 좌석 {seat_id} 카페 이용 중"
-                              f"(점유 {seat_sc:.0f}점 {seat_st}) → SUSPICIOUS 보류")
+                        # 페이즈 6-C: start_time 리셋하지 않음 — elapsed 계속 누적.
+                        # 좌석 점수가 OCCUPIED 미만으로 떨어지면 즉시 SUSPICIOUS 진입.
+                        item.suspicious_held = True
+                        if frame_count % 30 == 0:
+                            print(f"💺 [ID: {master_id}] 좌석 {seat_id} 카페 OCCUPIED "
+                                  f"({seat_sc:.0f}점) → SUSPICIOUS 보류 "
+                                  f"(elapsed {elapsed:.0f}s)")
                     else:
+                        if item.suspicious_held:
+                            print(f"⚠️  [ID: {master_id}] 보류 해제 — 좌석 점유 신호 무너짐 "
+                                  f"({seat_sc:.0f}점 {seat_st}, cafe="
+                                  f"{'○' if cafe_active else '✗'})")
+                            item.suspicious_held = False
                         cafe_tag = "☕ 카페" if cafe_active else "🚪 카페外"
                         print(f"\n⏱️  [ID: {master_id}] {elapsed:.0f}초 경과 {cafe_tag} "
                               f"(점유 {seat_sc:.0f}점 {seat_st}) → SUSPICIOUS")
@@ -451,6 +478,13 @@ def main():
             renderer.draw_safe_radius(frame, cx, cy)
             renderer.draw_item(frame, x1, y1, x2, y2, item)
         t_state = time.perf_counter() - t0
+
+        # ── pending 정리 — 이번 프레임에 안 보인 track_id 제거 ─────
+        # (BoxMOT 트랙이 정지 누적 중 사라지면 타이머 리셋 효과)
+        seen_tids = {int(t.track_id) for t in tracks if t.is_confirmed()}
+        stale_pending = [tid for tid in pending if tid not in seen_tids]
+        for tid in stale_pending:
+            del pending[tid]
 
         # ── 좌석 점유 점수 + 카페 컨텍스트 갱신 ───────────
         # 활성 물건의 최신 _bbox가 반영된 시점에 호출.
