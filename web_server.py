@@ -21,7 +21,8 @@ def load_all_posts():
                 post = json.load(f)
                 post["_file"] = os.path.basename(path)
                 posts.append(post)
-        except Exception:
+        except Exception as e:
+            print(f"⚠️ [web:load_all_posts] {os.path.basename(path)} 로드 실패 — {type(e).__name__}: {e}")
             continue
     # 최신순 정렬
     posts.sort(key=lambda p: p.get("time", ""), reverse=True)

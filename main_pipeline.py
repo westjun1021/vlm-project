@@ -1,6 +1,7 @@
 import cv2
 import time
 import json
+import traceback
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from ultralytics import YOLO
@@ -64,6 +65,118 @@ def _build_seat_info(seat_occupancy, seat_id, current_time) -> str:
         f"- 점유 흔적: {bd_str}\n"
         f"- 종합 점유 점수: {score:.0f}점 ({status})"
     )
+
+
+# ============================================================
+#  비동기 VLM 결과 수신/처리 — TRACKING 리셋 분기 + try/except + 상태 갱신
+# ============================================================
+def _handle_vlm_result(item, master_id, current_time, elapsed) -> str:
+    """
+    비동기 VLM 결과 수신/처리.
+    Returns: 갱신된 state (호출자에서 변수 갱신용).
+    """
+    state = item.state
+    # VLM 호출 이후 물건이 이동하여 TRACKING으로 리셋된 경우 결과 버림
+    if item.state == ST_TRACKING:
+        item._vlm_future = None
+        item._vlm_context = None
+        print(f"⚠️  [ID: {master_id}] VLM 결과 도착했으나 이미 TRACKING 리셋 → 결과 무시")
+    else:
+        ctx = item._vlm_context or {}
+        try:
+            raw = item._vlm_future.result()
+            result_json = json.loads(raw)
+
+            stage = ctx.get("stage", "SUSPICIOUS")
+            print(f"{'=' * 40}")
+            print(f"🎯 [VLM - {stage}] {result_json['status']}")
+            print(f"   근거: {result_json['reason']}")
+            print(f"{'=' * 40}\n")
+
+            if stage == "SUSPICIOUS":
+                if result_json["status"] == "SAFE":
+                    print(f"🟢 [ID: {master_id}] 주인 확인 → TRACKING 복귀")
+                    item.reset_to_tracking(current_time)
+                    state = ST_TRACKING
+                else:
+                    item.state = ST_WARNING
+                    state = ST_WARNING
+                    item._last_reason = result_json.get("reason", "")
+                    save_alert(master_id, ST_WARNING, result_json, item.score, LOCATION,
+                               ctx.get("fname", ""))
+                save_log(ctx.get("fname", ""), elapsed / 60, LOCATION,
+                         ST_SUSPICIOUS, result_json, VLM_BACKEND)
+
+            elif stage == "LOST":
+                if result_json.get("status") == "WARNING":
+                    # VLM이 주인 발견 → TRACKING 복귀
+                    print(f"🟢 [ID: {master_id}] 주인 확인 (LOST 재확인) → TRACKING 복귀")
+                    item.reset_to_tracking(current_time)
+                    state = ST_TRACKING
+                    remove_board_post(master_id)
+                else:
+                    item.state = ST_LOST
+                    state = ST_LOST
+                    item._last_reason = result_json.get("reason", "")
+                    save_alert(master_id, ST_LOST, result_json, item.score, LOCATION,
+                               ctx.get("fname", ""))
+                save_log(ctx.get("fname", ""), elapsed / 60, LOCATION,
+                         ST_LOST, result_json, VLM_BACKEND)
+
+        except Exception as e:
+            stage = ctx.get("stage", "?")
+            print(f"❌ [VLM 결과 처리] master_id={master_id} stage={stage} — {type(e).__name__}: {e}")
+            traceback.print_exc()
+            # fail-safe: SUSPICIOUS면 WARNING으로, LOST면 LOST 확정
+            if stage == "SUSPICIOUS":
+                item.state = ST_WARNING
+            else:
+                item.state = ST_LOST
+
+        item._vlm_future = None
+        item._vlm_context = None
+    return state
+
+
+# ============================================================
+#  좌석 점유 디버그 출력 — 5초 throttle은 호출자에서 처리
+# ============================================================
+def _print_seat_debug(items, seat_indicators, seat_occupancy,
+                      current_time, pipeline_start) -> None:
+    """5초 throttle 외부에서 처리, 함수는 순수 출력만."""
+    elapsed_sec = int(current_time - pipeline_start)
+    # 전역 카운트는 추적되지 않는 raw 표식(현재 컵)만 표시.
+    global_counts = {name: 0 for name in SEAT_INDICATOR_NAMES.values()}
+    for _, _, _, _, cls in seat_indicators:
+        global_counts[SEAT_INDICATOR_NAMES.get(cls, str(cls))] = \
+            global_counts.get(SEAT_INDICATOR_NAMES.get(cls, str(cls)), 0) + 1
+    item_count = len(items)
+    counts_str = " ".join(f"{k}={v}" for k, v in global_counts.items() if v)
+    print(f"[t={elapsed_sec}s] global: items={item_count} {counts_str}")
+    for seat in SEATS:
+        if seat.region == (0, 0, 0, 0):
+            print(f"  seat_{seat.seat_id}: (영역 미설정)")
+            continue
+        item_in = sum(1 for it in items.values() if it.seat_id == seat.seat_id)
+        ind_in = {name: 0 for name in SEAT_INDICATOR_NAMES.values()}
+        for x1, y1, x2, y2, cls in seat_indicators:
+            if box_in_seat((x1, y1, x2, y2), seat):
+                nm = SEAT_INDICATOR_NAMES.get(cls, str(cls))
+                ind_in[nm] = ind_in.get(nm, 0) + 1
+        ind_str = " ".join(f"{k}={v}" for k, v in ind_in.items() if v)
+        score  = seat_occupancy.get_score(seat.seat_id)
+        raw_old, raw_new = seat_occupancy.get_score_raw_range(seat.seat_id)
+        status = seat_occupancy.get_status(seat.seat_id)
+        cafe   = "○" if seat_occupancy.is_cafe_active(seat.seat_id, current_time) else "✗"
+        print(f"  seat_{seat.seat_id}: cafe={cafe} score={int(score)} "
+              f"(raw {int(raw_old)}→{int(raw_new)}) [{status}] "
+              f"items={item_in} {ind_str}")
+    if items:
+        item_rows = ", ".join(
+            f"ID={it.master_id} cls={it.cls} seat={it.seat_id or '-'} state={it.state}"
+            for it in items.values()
+        )
+        print(f"  items: {item_rows}")
 
 
 # ============================================================
@@ -283,63 +396,7 @@ def main():
 
             # ── 비동기 VLM 결과 수신 ─────────────────────────
             if item._vlm_future is not None and item._vlm_future.done():
-                # VLM 호출 이후 물건이 이동하여 TRACKING으로 리셋된 경우 결과 버림
-                if item.state == ST_TRACKING:
-                    item._vlm_future = None
-                    item._vlm_context = None
-                    print(f"⚠️  [ID: {master_id}] VLM 결과 도착했으나 이미 TRACKING 리셋 → 결과 무시")
-                else:
-                    ctx = item._vlm_context or {}
-                    try:
-                        raw = item._vlm_future.result()
-                        result_json = json.loads(raw)
-
-                        stage = ctx.get("stage", "SUSPICIOUS")
-                        print(f"{'=' * 40}")
-                        print(f"🎯 [VLM - {stage}] {result_json['status']}")
-                        print(f"   근거: {result_json['reason']}")
-                        print(f"{'=' * 40}\n")
-
-                        if stage == "SUSPICIOUS":
-                            if result_json["status"] == "SAFE":
-                                print(f"🟢 [ID: {master_id}] 주인 확인 → TRACKING 복귀")
-                                item.reset_to_tracking(current_time)
-                                state = ST_TRACKING
-                            else:
-                                item.state = ST_WARNING
-                                state = ST_WARNING
-                                item._last_reason = result_json.get("reason", "")
-                                save_alert(master_id, ST_WARNING, result_json, item.score, LOCATION,
-                                           ctx.get("fname", ""))
-                            save_log(ctx.get("fname", ""), elapsed / 60, LOCATION,
-                                     ST_SUSPICIOUS, result_json, VLM_BACKEND)
-
-                        elif stage == "LOST":
-                            if result_json.get("status") == "WARNING":
-                                # VLM이 주인 발견 → TRACKING 복귀
-                                print(f"🟢 [ID: {master_id}] 주인 확인 (LOST 재확인) → TRACKING 복귀")
-                                item.reset_to_tracking(current_time)
-                                state = ST_TRACKING
-                                remove_board_post(master_id)
-                            else:
-                                item.state = ST_LOST
-                                state = ST_LOST
-                                item._last_reason = result_json.get("reason", "")
-                                save_alert(master_id, ST_LOST, result_json, item.score, LOCATION,
-                                           ctx.get("fname", ""))
-                            save_log(ctx.get("fname", ""), elapsed / 60, LOCATION,
-                                     ST_LOST, result_json, VLM_BACKEND)
-
-                    except Exception as e:
-                        stage = ctx.get("stage", "?")
-                        print(f"❌ VLM 결과 처리 실패 ({stage}): {e}")
-                        if stage == "SUSPICIOUS":
-                            item.state = ST_WARNING
-                        else:
-                            item.state = ST_LOST
-
-                    item._vlm_future = None
-                    item._vlm_context = None
+                state = _handle_vlm_result(item, master_id, current_time, elapsed)
 
             # TRACKING → SUSPICIOUS (카페 컨텍스트 + 점유 흔적 게이트)
             if state == ST_TRACKING and item.person_near_duration < PASSERBY_MAX_SEC:
@@ -549,39 +606,8 @@ def main():
 
         # ── 좌석 점유 디버그 (5초마다) ────────────────────
         if current_time - last_seat_debug >= 5.0:
-            elapsed_sec = int(current_time - pipeline_start)
-            # 전역 카운트는 추적되지 않는 raw 표식(현재 컵)만 표시.
-            global_counts = {name: 0 for name in SEAT_INDICATOR_NAMES.values()}
-            for _, _, _, _, cls in seat_indicators:
-                global_counts[SEAT_INDICATOR_NAMES.get(cls, str(cls))] = \
-                    global_counts.get(SEAT_INDICATOR_NAMES.get(cls, str(cls)), 0) + 1
-            item_count = len(items)
-            counts_str = " ".join(f"{k}={v}" for k, v in global_counts.items() if v)
-            print(f"[t={elapsed_sec}s] global: items={item_count} {counts_str}")
-            for seat in SEATS:
-                if seat.region == (0, 0, 0, 0):
-                    print(f"  seat_{seat.seat_id}: (영역 미설정)")
-                    continue
-                item_in = sum(1 for it in items.values() if it.seat_id == seat.seat_id)
-                ind_in = {name: 0 for name in SEAT_INDICATOR_NAMES.values()}
-                for x1, y1, x2, y2, cls in seat_indicators:
-                    if box_in_seat((x1, y1, x2, y2), seat):
-                        nm = SEAT_INDICATOR_NAMES.get(cls, str(cls))
-                        ind_in[nm] = ind_in.get(nm, 0) + 1
-                ind_str = " ".join(f"{k}={v}" for k, v in ind_in.items() if v)
-                score  = seat_occupancy.get_score(seat.seat_id)
-                raw_old, raw_new = seat_occupancy.get_score_raw_range(seat.seat_id)
-                status = seat_occupancy.get_status(seat.seat_id)
-                cafe   = "○" if seat_occupancy.is_cafe_active(seat.seat_id, current_time) else "✗"
-                print(f"  seat_{seat.seat_id}: cafe={cafe} score={int(score)} "
-                      f"(raw {int(raw_old)}→{int(raw_new)}) [{status}] "
-                      f"items={item_in} {ind_str}")
-            if items:
-                item_rows = ", ".join(
-                    f"ID={it.master_id} cls={it.cls} seat={it.seat_id or '-'} state={it.state}"
-                    for it in items.values()
-                )
-                print(f"  items: {item_rows}")
+            _print_seat_debug(items, seat_indicators, seat_occupancy,
+                              current_time, pipeline_start)
             last_seat_debug = current_time
 
         # ── GC: 오래된 객체 제거 ──────────────────────────

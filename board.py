@@ -7,6 +7,7 @@ import os
 import json
 import glob
 import time
+import traceback
 import cv2
 
 from config import BOARD_MIN_SCORE
@@ -33,7 +34,8 @@ def _restore_posted_ids():
             if master_id is not None and post_id:
                 _posted_ids[int(master_id)] = post_id
                 restored += 1
-        except Exception:
+        except Exception as e:
+            print(f"⚠️ [board:_restore_posted_ids] {os.path.basename(path)} 로드 실패 — {type(e).__name__}: {e}")
             continue
     if restored:
         print(f"📂 [복원] 기존 게시글 {restored}건 _posted_ids 로드 완료")
@@ -75,8 +77,9 @@ def save_board_post(master_id, status, reason, score, location, image_frame,
                     safe_img = apply_privacy_filter(image_frame, person_boxes, bag_box)
                     if safe_img is not None:
                         cv2.imwrite(os.path.join(board_dir, f"{post_id}.jpg"), safe_img)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"⚠️ [board:save_board_post] master_id={master_id} 업데이트 실패 — {type(e).__name__}: {e}")
+                traceback.print_exc()
             return
 
     # 신규 등록 — 점수 기준 미달이면 스킵
