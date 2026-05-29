@@ -258,6 +258,14 @@ def main():
     last_seat_debug = 0.0
     seat_occupancy = SeatOccupancy(SEATS)
 
+    # ── 이벤트 클립용 링 버퍼 — clean_frame(오버레이 전) 저장 ──
+    # 실효 FPS = 추정 30 / FRAME_SKIP (실제 측정 후 보정 가능)
+    _effective_fps = 30 / FRAME_SKIP
+    _buffer_maxlen = int(EVENT_BUFFER_SECONDS * _effective_fps)
+    frame_buffer: deque = deque(maxlen=_buffer_maxlen)
+    print(f"💾 이벤트 버퍼: {EVENT_BUFFER_SECONDS}초 × {_effective_fps:.0f} fps "
+          f"= {_buffer_maxlen} 프레임")
+
     # ── 성능 측정 ─────────────────────────────────────────
     # 각 처리 단계별 시간을 deque로 누적 (최근 300개 = ~10초 at 30fps).
     stage_times: dict[str, deque] = {
@@ -336,6 +344,10 @@ def main():
 
         # ── 게시판 이미지용 깨끗한 프레임 (오버레이 전) ────
         clean_frame = frame.copy()
+
+        # 이벤트 클립용 버퍼 갱신 — 매 프레임 clean_frame 저장 (timestamp 함께)
+        # frame.copy()는 위에서 이미 했으므로 추가 copy 안 함. (단계 3에서 시간 기반 검색)
+        frame_buffer.append((current_time, clean_frame))
 
         # ── 트랙별 처리 ──────────────────────────────────
         t0 = time.perf_counter()

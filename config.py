@@ -179,3 +179,10 @@ STATE_PRIORITY = {
     ST_WARNING:    2,
     ST_LOST:       3,
 }
+
+# ============================================================
+#  이벤트 클립 저장 (페이즈 7 — RAM 링 버퍼)
+# ============================================================
+EVENT_BUFFER_SECONDS = int(os.getenv("EVENT_BUFFER_SECONDS", "10"))
+EVENT_POST_SECONDS   = int(os.getenv("EVENT_POST_SECONDS", "10"))
+EVENTS_DIR           = os.getenv("EVENTS_DIR", "events")
