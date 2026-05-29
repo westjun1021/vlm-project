@@ -14,6 +14,7 @@ from tracked_item import TrackedItem
 from renderer import OverlayRenderer
 from board import save_board_post, remove_board_post, _restore_posted_ids
 from logger import save_log, save_alert
+from event_clip import EventClipRecorder
 from seats import SEATS, box_in_seat
 from seat_occupancy import SeatOccupancy
 from tracker import ItemTracker
@@ -70,7 +71,8 @@ def _build_seat_info(seat_occupancy, seat_id, current_time) -> str:
 # ============================================================
 #  비동기 VLM 결과 수신/처리 — TRACKING 리셋 분기 + try/except + 상태 갱신
 # ============================================================
-def _handle_vlm_result(item, master_id, current_time, elapsed) -> str:
+def _handle_vlm_result(item, master_id, current_time, elapsed,
+                       clip_recorder, frame_buffer) -> str:
     """
     비동기 VLM 결과 수신/처리.
     Returns: 갱신된 state (호출자에서 변수 갱신용).
@@ -106,6 +108,7 @@ def _handle_vlm_result(item, master_id, current_time, elapsed) -> str:
                     item._last_reason = reason
                     save_alert(master_id, ST_WARNING, result_json, item.score, LOCATION,
                                ctx.get("fname", ""))
+                    clip_recorder.trigger(master_id, "WARNING", frame_buffer, current_time)
                 else:
                     # 알 수 없는 status (UNKNOWN, DANGER, 오타 등) → 보수적: 상태 유지 + 재시도
                     print(f"⚠️   [ID: {master_id}] VLM SUSPICIOUS 응답 status={status!r} 알 수 없음 "
@@ -116,8 +119,9 @@ def _handle_vlm_result(item, master_id, current_time, elapsed) -> str:
 
             elif stage == "LOST":
                 if status == "WARNING":
-                    # VLM이 주인 발견 → TRACKING 복귀
+                    # VLM이 주인 발견 → TRACKING 복귀 (LOST에서 복귀 = RECOVERED)
                     print(f"🟢 [ID: {master_id}] 주인 확인 (LOST 재확인) → TRACKING 복귀")
+                    clip_recorder.trigger(master_id, "RECOVERED", frame_buffer, current_time)
                     item.reset_to_tracking(current_time)
                     state = ST_TRACKING
                     remove_board_post(master_id)
@@ -127,6 +131,7 @@ def _handle_vlm_result(item, master_id, current_time, elapsed) -> str:
                     item._last_reason = reason
                     save_alert(master_id, ST_LOST, result_json, item.score, LOCATION,
                                ctx.get("fname", ""))
+                    clip_recorder.trigger(master_id, "LOST", frame_buffer, current_time)
                 else:
                     # 알 수 없는 status → 보수적: LOST 확정 안 함, WARNING 유지
                     print(f"⚠️   [ID: {master_id}] VLM LOST 응답 status={status!r} 알 수 없음 "
@@ -254,6 +259,10 @@ def main():
     frame_count   = 0
     renderer      = OverlayRenderer()
     vlm_executor  = ThreadPoolExecutor(max_workers=2)  # VLM 비동기 호출용
+
+    # 이벤트 클립 저장용 별도 executor (vlm과 분리 — mp4 인코딩이 VLM 호출 막지 않도록)
+    clip_executor = ThreadPoolExecutor(max_workers=2)
+    clip_recorder = EventClipRecorder(clip_executor)
     pipeline_start = time.time()
     last_seat_debug = 0.0
     seat_occupancy = SeatOccupancy(SEATS)
@@ -346,8 +355,10 @@ def main():
         clean_frame = frame.copy()
 
         # 이벤트 클립용 버퍼 갱신 — 매 프레임 clean_frame 저장 (timestamp 함께)
-        # frame.copy()는 위에서 이미 했으므로 추가 copy 안 함. (단계 3에서 시간 기반 검색)
+        # frame.copy()는 위에서 이미 했으므로 추가 copy 안 함.
         frame_buffer.append((current_time, clean_frame))
+        # 활성 클립 세션에 이번 프레임 누적 (이벤트 후 녹화)
+        clip_recorder.update(current_time, clean_frame)
 
         # ── 트랙별 처리 ──────────────────────────────────
         t0 = time.perf_counter()
@@ -467,7 +478,8 @@ def main():
 
             # ── 비동기 VLM 결과 수신 ─────────────────────────
             if item._vlm_future is not None and item._vlm_future.done():
-                state = _handle_vlm_result(item, master_id, current_time, elapsed)
+                state = _handle_vlm_result(item, master_id, current_time, elapsed,
+                                           clip_recorder, frame_buffer)
 
             # TRACKING → SUSPICIOUS (카페 컨텍스트 + 점유 흔적 게이트)
             if state == ST_TRACKING and item.person_near_duration < PASSERBY_MAX_SEC:
@@ -522,6 +534,7 @@ def main():
                         save_alert(master_id, ST_WARNING, result_json, item.score, LOCATION, fname)
                         save_log(fname, elapsed / 60, LOCATION, ST_WARNING, result_json, "CV")
                         print(f"🟡 [ID: {master_id}] WARNING — {result_json['reason']}")
+                        clip_recorder.trigger(master_id, "WARNING", frame_buffer, current_time)
 
                 else:
                     # 주인 후보 → VLM 비동기 호출
@@ -554,6 +567,9 @@ def main():
             # WARNING/LOST 중 주인 복귀 감지 (엄격한 기준)
             if state in (ST_WARNING, ST_LOST) and item.person_near_duration >= DWELL_RETURN_SEC:
                 print(f"👀 [ID: {master_id}] {state} 중 사람 {DWELL_RETURN_SEC}초 이상 체류 → TRACKING")
+                # LOST에서 복귀할 때만 RECOVERED 클립 (주인 복귀 성공 사례). reset 전에 호출.
+                if state == ST_LOST:
+                    clip_recorder.trigger(master_id, "RECOVERED", frame_buffer, current_time)
                 item.reset_to_tracking(current_time)
                 state = ST_TRACKING
                 result_json = {"status": "SAFE", "reason": f"사람이 {DWELL_RETURN_SEC}초 이상 연속 체류하여 주인 복귀로 판단"}
@@ -736,11 +752,15 @@ def main():
                     cap.release()
                     cv2.destroyAllWindows()
                     vlm_executor.shutdown(wait=False)
+                    clip_recorder.flush()            # 진행 중이던 클립 강제 저장
+                    clip_executor.shutdown(wait=True)  # 저장 완료까지 대기 (파일 깨짐 방지)
                     return
 
     cap.release()
     cv2.destroyAllWindows()
     vlm_executor.shutdown(wait=False)
+    clip_recorder.flush()            # 진행 중이던 클립 강제 저장
+    clip_executor.shutdown(wait=True)  # 저장 완료까지 대기 (파일 깨짐 방지)
 
 
 if __name__ == "__main__":

@@ -16,6 +16,9 @@ static/board/
 static/latest_alert.jpg
 static/latest_alert.json
 
+# 이벤트 클립 (런타임 생성 mp4)
+events/
+
 # Python 캐시
 __pycache__/
 *.pyc
