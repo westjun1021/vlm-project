@@ -197,13 +197,50 @@ def _print_seat_debug(items, seat_indicators, seat_occupancy,
 
 
 # ============================================================
+#  영상 소스 — 파일 / RTSP (페이즈 7)
+# ============================================================
+def _mask_rtsp_url(url: str) -> str:
+    """RTSP URL에서 비밀번호 가린 버전 — 로그 출력용."""
+    if "@" in url:
+        # rtsp://user:pass@ip:port/path → rtsp://***@ip:port/path
+        proto_userpass, host_path = url.split("@", 1)
+        return f"{proto_userpass.split('://')[0]}://***@{host_path}"
+    return url
+
+
+def _open_video_source():
+    """영상 소스 열기 — RTSP는 재시도, 파일은 즉시."""
+    if VIDEO_SOURCE == "rtsp":
+        masked = _mask_rtsp_url(RTSP_URL)
+        print(f"📡 RTSP 연결 시도: {masked}")
+        for attempt in range(1, RTSP_RETRY_COUNT + 1):
+            cap = cv2.VideoCapture(RTSP_URL)
+            if cap.isOpened():
+                ret, _ = cap.read()
+                if ret:
+                    print(f"✅ RTSP 연결 성공 (시도 {attempt}/{RTSP_RETRY_COUNT})")
+                    return cap
+                cap.release()
+            print(f"⏳ RTSP 연결 재시도 {attempt}/{RTSP_RETRY_COUNT} "
+                  f"({RTSP_RETRY_WAIT}초 대기)")
+            time.sleep(RTSP_RETRY_WAIT)
+        raise RuntimeError(f"RTSP 연결 실패 ({RTSP_RETRY_COUNT}회 시도): {masked}")
+    else:
+        print(f"📁 영상 파일 열기: {VIDEO_FILE_PATH}")
+        cap = cv2.VideoCapture(VIDEO_FILE_PATH)
+        if not cap.isOpened():
+            raise RuntimeError(f"영상 파일 열기 실패: {VIDEO_FILE_PATH}")
+        return cap
+
+
+# ============================================================
 #  메인 파이프라인
 # ============================================================
 def main():
     # ── 초기화 ────────────────────────────────────────────
     yolo    = YOLO(YOLO_MODEL)
     tracker = ItemTracker()   # BoxMOT BotSort 어댑터 (DeepSort 인터페이스 호환)
-    cap     = cv2.VideoCapture("case1.mp4")
+    cap     = _open_video_source()
 
     # 기존 게시글 _posted_ids 복원 + master_id 카운터 재초기화 (재시작 시 충돌 방지)
     max_existing_mid = _restore_posted_ids()

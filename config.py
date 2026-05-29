@@ -16,6 +16,23 @@ if not api_key:
     raise ValueError("API 키를 찾을 수 없습니다.")
 
 # ============================================================
+#  영상 소스 설정 (페이즈 7 — RTSP 지원)
+# ============================================================
+VIDEO_SOURCE    = os.getenv("VIDEO_SOURCE", "file").lower()
+VIDEO_FILE_PATH = os.getenv("VIDEO_FILE_PATH", "case1.mp4")
+RTSP_URL        = os.getenv("RTSP_URL", "")
+
+# RTSP 재시도 정책
+RTSP_RETRY_COUNT = int(os.getenv("RTSP_RETRY_COUNT", "3"))
+RTSP_RETRY_WAIT  = int(os.getenv("RTSP_RETRY_WAIT", "5"))
+
+# 유효성 검증
+if VIDEO_SOURCE not in ("file", "rtsp"):
+    raise ValueError(f"VIDEO_SOURCE must be 'file' or 'rtsp', got: {VIDEO_SOURCE}")
+if VIDEO_SOURCE == "rtsp" and not RTSP_URL:
+    raise ValueError("VIDEO_SOURCE=rtsp인데 RTSP_URL이 .env에 없음")
+
+# ============================================================
 #  모델
 # ============================================================
 YOLO_MODEL     = "yolo11s.pt"   # s: 닫힌 노트북/작은 컵 인식률 향상 (n→s, 약 19MB)
