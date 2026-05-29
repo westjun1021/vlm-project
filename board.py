@@ -18,13 +18,15 @@ from utils import apply_privacy_filter
 _posted_ids: dict[int, str] = {}
 
 
-def _restore_posted_ids():
+def _restore_posted_ids() -> int:
     """파이프라인 재시작 시 기존 board JSON에서 _posted_ids 복원.
-    없으면 중복 등록 / 주인 복귀 시 삭제 누락이 발생한다."""
+    없으면 중복 등록 / 주인 복귀 시 삭제 누락이 발생한다.
+    Returns: 복원된 master_id 중 최댓값 (없으면 0). 호출자가 카운터 재설정에 사용."""
     board_dir = "static/board"
     if not os.path.isdir(board_dir):
-        return
+        return 0
     restored = 0
+    max_mid = 0
     for path in glob.glob(os.path.join(board_dir, "*.json")):
         try:
             with open(path, "r", encoding="utf-8") as f:
@@ -32,13 +34,18 @@ def _restore_posted_ids():
             master_id = data.get("id")
             post_id   = data.get("post_id")
             if master_id is not None and post_id:
-                _posted_ids[int(master_id)] = post_id
+                mid_int = int(master_id)
+                _posted_ids[mid_int] = post_id
+                if mid_int > max_mid:
+                    max_mid = mid_int
                 restored += 1
         except Exception as e:
             print(f"⚠️ [board:_restore_posted_ids] {os.path.basename(path)} 로드 실패 — {type(e).__name__}: {e}")
             continue
     if restored:
-        print(f"📂 [복원] 기존 게시글 {restored}건 _posted_ids 로드 완료")
+        print(f"📂 [복원] 기존 게시글 {restored}건 _posted_ids 로드 완료 "
+              f"(max master_id={max_mid})")
+    return max_mid
 
 
 def save_board_post(master_id, status, reason, score, location, image_frame,

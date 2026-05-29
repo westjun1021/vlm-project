@@ -1,6 +1,7 @@
 import cv2
 import time
 import json
+import itertools
 import traceback
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
@@ -11,7 +12,7 @@ from utils import dist, box_overlap_ratio, apply_privacy_filter
 from vlm_backend import call_vlm
 from tracked_item import TrackedItem
 from renderer import OverlayRenderer
-from board import save_board_post, remove_board_post
+from board import save_board_post, remove_board_post, _restore_posted_ids
 from logger import save_log, save_alert
 from seats import SEATS, box_in_seat
 from seat_occupancy import SeatOccupancy
@@ -32,13 +33,12 @@ def _timed_call_vlm(*args, **kwargs):
 
 # ============================================================
 #  master_id monotonic 카운터 — BoxMOT track_id 재활용과 무관하게 유일성 보장
+#  파이프라인 재시작 시 main()에서 _restore_posted_ids() 결과로 재초기화됨.
 # ============================================================
-_next_master_id = [1]   # 리스트로 mutable 참조
+_master_id_counter = itertools.count(1)
 
 def get_next_master_id() -> int:
-    mid = _next_master_id[0]
-    _next_master_id[0] += 1
-    return mid
+    return next(_master_id_counter)
 
 
 # ============================================================
@@ -87,39 +87,52 @@ def _handle_vlm_result(item, master_id, current_time, elapsed) -> str:
             raw = item._vlm_future.result()
             result_json = json.loads(raw)
 
-            stage = ctx.get("stage", "SUSPICIOUS")
+            stage  = ctx.get("stage", "SUSPICIOUS")
+            status = result_json.get("status", "UNKNOWN")
+            reason = result_json.get("reason", "근거 없음")
             print(f"{'=' * 40}")
-            print(f"🎯 [VLM - {stage}] {result_json['status']}")
-            print(f"   근거: {result_json['reason']}")
+            print(f"🎯 [VLM - {stage}] {status}")
+            print(f"   근거: {reason}")
             print(f"{'=' * 40}\n")
 
             if stage == "SUSPICIOUS":
-                if result_json["status"] == "SAFE":
+                if status == "SAFE":
                     print(f"🟢 [ID: {master_id}] 주인 확인 → TRACKING 복귀")
                     item.reset_to_tracking(current_time)
                     state = ST_TRACKING
-                else:
+                elif status == "WARNING":
                     item.state = ST_WARNING
                     state = ST_WARNING
-                    item._last_reason = result_json.get("reason", "")
+                    item._last_reason = reason
                     save_alert(master_id, ST_WARNING, result_json, item.score, LOCATION,
                                ctx.get("fname", ""))
+                else:
+                    # 알 수 없는 status (UNKNOWN, DANGER, 오타 등) → 보수적: 상태 유지 + 재시도
+                    print(f"⚠️   [ID: {master_id}] VLM SUSPICIOUS 응답 status={status!r} 알 수 없음 "
+                          f"→ SUSPICIOUS 상태 유지 (재시도 대기)")
+                    item.vlm_called = False  # 다음 사이클에 재호출 가능
                 save_log(ctx.get("fname", ""), elapsed / 60, LOCATION,
                          ST_SUSPICIOUS, result_json, VLM_BACKEND)
 
             elif stage == "LOST":
-                if result_json.get("status") == "WARNING":
+                if status == "WARNING":
                     # VLM이 주인 발견 → TRACKING 복귀
                     print(f"🟢 [ID: {master_id}] 주인 확인 (LOST 재확인) → TRACKING 복귀")
                     item.reset_to_tracking(current_time)
                     state = ST_TRACKING
                     remove_board_post(master_id)
-                else:
+                elif status == "DANGER":
                     item.state = ST_LOST
                     state = ST_LOST
-                    item._last_reason = result_json.get("reason", "")
+                    item._last_reason = reason
                     save_alert(master_id, ST_LOST, result_json, item.score, LOCATION,
                                ctx.get("fname", ""))
+                else:
+                    # 알 수 없는 status → 보수적: LOST 확정 안 함, WARNING 유지
+                    print(f"⚠️   [ID: {master_id}] VLM LOST 응답 status={status!r} 알 수 없음 "
+                          f"→ WARNING 상태 유지")
+                    item.state = ST_WARNING
+                    state = ST_WARNING
                 save_log(ctx.get("fname", ""), elapsed / 60, LOCATION,
                          ST_LOST, result_json, VLM_BACKEND)
 
@@ -127,11 +140,15 @@ def _handle_vlm_result(item, master_id, current_time, elapsed) -> str:
             stage = ctx.get("stage", "?")
             print(f"❌ [VLM 결과 처리] master_id={master_id} stage={stage} — {type(e).__name__}: {e}")
             traceback.print_exc()
-            # fail-safe: SUSPICIOUS면 WARNING으로, LOST면 LOST 확정
+            # 보수적 fail-safe — false WARNING/LOST 방지
             if stage == "SUSPICIOUS":
+                # SUSPICIOUS 상태 유지 + 재시도 가능
+                item.vlm_called = False
+                print(f"   ↻ SUSPICIOUS 상태 유지, 다음 사이클에 재시도")
+            else:  # LOST
+                # LOST 확정 안 함, WARNING으로 격하
                 item.state = ST_WARNING
-            else:
-                item.state = ST_LOST
+                print(f"   ↻ WARNING으로 격하 (LOST 확정 보류)")
 
         item._vlm_future = None
         item._vlm_context = None
@@ -187,6 +204,11 @@ def main():
     yolo    = YOLO(YOLO_MODEL)
     tracker = ItemTracker()   # BoxMOT BotSort 어댑터 (DeepSort 인터페이스 호환)
     cap     = cv2.VideoCapture("case1.mp4")
+
+    # 기존 게시글 _posted_ids 복원 + master_id 카운터 재초기화 (재시작 시 충돌 방지)
+    max_existing_mid = _restore_posted_ids()
+    global _master_id_counter
+    _master_id_counter = itertools.count(max_existing_mid + 1)
 
     items: dict[int, TrackedItem] = {}   # track_id → TrackedItem
     # 페이즈 6-C: 신규 등록 전 정지 검증 — track_id → (first_seen_time, (cx, cy))

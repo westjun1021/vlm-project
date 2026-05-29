@@ -1,0 +1,22 @@
+# ============================================================
+#  분실물 감지 시스템 — Python 패키지 의존성
+#  설치: pip install -r requirements.txt
+# ============================================================
+
+# YOLO + 추적
+ultralytics>=8.0.0
+boxmot>=10.0.0
+torch>=2.0.0          # BotSort/ReID 트래커 및 YOLO 백엔드
+opencv-python>=4.8.0  # cv2
+
+# VLM
+openai>=1.0.0         # GPT-4o 호출
+python-dotenv>=1.0.0  # .env 로드
+requests>=2.31.0      # 로컬 VLM 백엔드 (페이즈 8 예정)
+
+# 웹 서버
+flask>=3.0.0
+flask-cors>=4.0.0
+
+# 유틸
+numpy>=1.24.0
